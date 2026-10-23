@@ -1,0 +1,29 @@
+const {chromium,request}=require('C:/Users/yumda/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/node_modules/playwright');
+const fs=require('node:fs'),path=require('node:path'),assert=require('node:assert/strict');
+(async()=>{
+ const meta=JSON.parse(fs.readFileSync('tmp/sources-ui-host.json','utf8')),checks=[],errors=[];
+ const browser=await chromium.launch({headless:true,executablePath:'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe'});
+ const page=await browser.newPage({viewport:{width:1440,height:1000}});page.on('pageerror',e=>errors.push(e.message));
+ async function api(p,body){return page.evaluate(async({p,body})=>{const r=await fetch('/api/'+p,body?{method:'POST',headers:{'Content-Type':'application/json','X-Local-Client':'1'},body:JSON.stringify(body)}:{});return {status:r.status,data:await r.json()};},{p,body});}
+ async function waitTasks(n){const until=Date.now()+150000;while(Date.now()<until){const r=await api('source/tasks');if(r.data.tasks.length>=n&&!r.data.tasks.some(t=>['queued','running'].includes(t.status)))return r.data.tasks;await new Promise(r=>setTimeout(r,250));}throw Error('采集超时');}
+ try{
+  const unauth=await request.newContext();assert.equal((await unauth.get(meta.url+'/api/source/tasks')).status(),403);await unauth.dispose();checks.push('source_history_requires_local_session');
+  await page.goto(meta.launch);await page.locator('#nav a[href="#sources"]').click();await page.locator('[data-source="resolve"]').waitFor();assert.equal(await page.locator('#start-pipeline').isVisible(),false);checks.push('source_navigation_and_contextual_footer');
+  await page.locator('[data-source="resolve"]').click();await page.locator('.source-drama').first().waitFor({timeout:60000});assert.equal(await page.locator('.source-drama').count(),24);checks.push('live_website_catalog_via_actual_app_api');
+  await page.locator('#source-filter').fill('觉醒伪神');assert.equal(await page.locator('.source-drama').count(),1);await page.locator('#source-filter').fill('');checks.push('current_page_title_filter');
+  await page.locator('[data-source="next"]').click();await page.locator('.source-paging').filter({hasText:'第 2 页'}).waitFor({timeout:60000});checks.push('real_catalog_pagination');
+  await page.locator('[data-source="previous"]').click();await page.locator('.source-paging').filter({hasText:'第 1 页'}).waitFor({timeout:60000});
+  await page.locator('.source-drama').first().click();await page.locator('.source-detail').waitFor({timeout:60000});assert.match(await page.locator('.source-metrics').textContent(),/热度.*评分.*总集数.*播放量未提供.*整剧发布时间未提供/);checks.push('live_detail_distinguishes_heat_unknown_plays_and_publish_date');
+  await page.waitForFunction(()=>document.querySelector('.source-cover img')?.naturalWidth>0,{timeout:60000});checks.push('authenticated_original_cover_preview_loaded');
+  await page.locator('[data-source="save"]').click();await page.locator('#toast').filter({hasText:'请选择保存目录'}).waitFor();checks.push('directory_required_before_submission');
+  await page.locator('#source-directory').fill(meta.base);await page.locator('[data-source="save"]').click();let tasks=await waitTasks(1);assert.equal(tasks[0].status,'completed');assert.equal(tasks[0].projectId,undefined);assert.ok(fs.existsSync(path.join(tasks[0].savedDirectory,'剧集资料.json')));checks.push('metadata_only_save_does_not_claim_video_import');
+  await page.waitForFunction(()=>sourceTasks[0]?.status==='completed');await page.evaluate(()=>scrollTo(0,0));await page.locator('#toast').waitFor({state:'hidden'});await page.setViewportSize({width:1440,height:1900});await page.screenshot({path:path.join(meta.base,'红果采集-原始资料.png'),fullPage:true});await page.setViewportSize({width:1440,height:1000});
+  await page.locator('[data-source="download"]').click();tasks=await waitTasks(2);assert.equal(tasks[1].status,'completed');assert.ok(tasks[1].projectId);await page.evaluate(()=>sourcePoll());await page.locator('[data-source="project"]').first().waitFor();checks.push('actual_public_episode_download_and_verified_import');assert.match(await page.locator('#activity-content').textContent(),/采集状态/);checks.push('sidebar_tracks_source_task_instead_of_video_queue');
+  await page.waitForFunction(()=>sourceTasks[1]?.status==='completed');await page.evaluate(()=>scrollTo(0,0));await page.locator('#toast').waitFor({state:'hidden'});await page.setViewportSize({width:1440,height:1900});await page.screenshot({path:path.join(meta.base,'红果采集-完成入库.png'),fullPage:true});await page.setViewportSize({width:1440,height:1000});
+  await page.locator('[data-source="project"]').first().click();await page.waitForURL(/#scan$/);assert.equal(await page.locator('#start-pipeline').isVisible(),true);assert.match(await page.locator('#library').textContent(),/觉醒伪神/);checks.push('downloaded_episode_enters_existing_material_workflow');
+  await page.locator('#nav a[href="#sources"]').click();await page.locator('#source-text').fill('https://127.0.0.1/private');await page.locator('[data-source="resolve"]').click();await page.locator('.source-error').waitFor();assert.equal(await page.locator('.source-detail').count(),0);checks.push('invalid_link_clears_previous_detail_and_blocks_other_hosts');
+  const cross=await api('source/start',{url:'https://127.0.0.1/a',directory:meta.base,video:true});assert.equal(cross.status,400);checks.push('unsupported_source_rejected_by_backend');
+  await page.setViewportSize({width:900,height:850});await page.screenshot({path:path.join(meta.base,'红果采集-窄窗口.png'),fullPage:true});assert.equal(errors.length,0,errors.join('\n'));checks.push('no_browser_runtime_errors');
+  fs.writeFileSync('tmp/sources-ui-report.json',JSON.stringify({passed:checks.length,checks,errors,base:meta.base},null,2));console.log(JSON.stringify({passed:checks.length,base:meta.base}));
+ }finally{await browser.close();}
+})().catch(e=>{console.error(e);process.exit(1)});

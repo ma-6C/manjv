@@ -1,0 +1,4 @@
+# Preserve release input bytes so SHA256 records survive clones on Windows.
+* -text
+*.png binary
+*.ico binary

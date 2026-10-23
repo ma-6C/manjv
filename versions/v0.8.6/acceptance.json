@@ -1,0 +1,36 @@
+{
+  "version": "0.8.6",
+  "date": "2026-10-23",
+  "installer": {
+    "file": "漫剧工坊-安装程序-0.8.6.exe",
+    "bytes": 395399945,
+    "sha256": "6027324f8d1381a0ae9dd4390cc63fcb57e91400f61b6f30ebbcb5d44e479543"
+  },
+  "compiledAndBrowserChecksPassed": 331,
+  "checkGroups": {
+    "optimization": 32,
+    "download-queue": 25,
+    "download-transport": 15,
+    "workflow": 26,
+    "source-security": 13,
+    "gpu": 22,
+    "track-sheets": 39,
+    "signing": 31,
+    "handoff": 32,
+    "continuous-ui": 36,
+    "scroll-ui": 13,
+    "search-ui": 26,
+    "handoff-ui": 21
+  },
+  "actualInstall": true,
+  "installedIntegrityVerified": true,
+  "nativeDesktopWindowObserved": true,
+  "nativeDesktopWindowResponding": true,
+  "actualUninstall": true,
+  "oldPermanentLicensesCompatible": true,
+  "oldOfflineEngineV1SignatureCompatible": true,
+  "nativeDesktopClickWorkflowTested": false,
+  "cleanWindowsVMTested": false,
+  "fixedExternalSpeedGuaranteed": false,
+  "offlineAIEngineIncluded": false
+}

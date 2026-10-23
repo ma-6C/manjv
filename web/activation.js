@@ -1,0 +1,6 @@
+'use strict';
+const machine=document.querySelector('#machine'),message=document.querySelector('#message');
+async function status(){const r=await fetch('/api/license',{cache:'no-store'}),v=await r.json();if(!r.ok)throw Error(v.error);if(v.valid){location.replace('/');return;}machine.value=v.machineCode;message.textContent=v.message;}
+status().catch(e=>message.textContent=e.message);
+document.querySelector('#copy').addEventListener('click',async()=>{try{await navigator.clipboard.writeText(machine.value);message.className='';message.textContent='机器码已复制，发送给软件提供方即可。';}catch(e){machine.select();message.textContent='请复制已选中的机器码。';}});
+document.querySelector('#activation-form').addEventListener('submit',async e=>{e.preventDefault();const b=document.querySelector('#activate');b.disabled=true;message.className='';message.textContent='正在校验授权…';try{const r=await fetch('/api/license/activate',{method:'POST',headers:{'Content-Type':'application/json','X-Local-Client':'1'},body:JSON.stringify({token:document.querySelector('#token').value.trim()})}),v=await r.json();if(!r.ok)throw Error(v.error);location.replace('/');}catch(error){message.className='error';message.textContent=error.message;b.disabled=false;}});

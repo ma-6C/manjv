@@ -1,0 +1,51 @@
+const {chromium}=require('C:/Users/yumda/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/node_modules/playwright');
+const fs=require('node:fs'),path=require('node:path');
+(async()=>{
+ const browser=await chromium.launch({headless:true,executablePath:'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe'});
+ const page=await browser.newPage({viewport:{width:1440,height:1100}}),errors=[],external=[];
+ page.on('pageerror',e=>errors.push(e.message));page.on('request',r=>{if(!r.url().startsWith('http://127.0.0.1:8766/'))external.push(r.url());});
+ await page.goto('http://127.0.0.1:8766/#api');await page.locator('#config-textProvider').waitFor();
+ const presets=await page.locator('#config-textProvider option').evaluateAll(options=>options.map(o=>o.value));
+ for(const id of presets){
+  await page.locator('#config-textProvider').selectOption(id);
+  await page.waitForFunction(id=>document.querySelector('#config-textProvider')?.value===id&&document.querySelector('#api-key')?.value==='',id);
+  await page.waitForTimeout(120);
+ }
+ await page.locator('#config-textProvider').selectOption('ark');await page.waitForTimeout(250);
+ await page.locator('#config-textModel').fill('ark-ui-test-model');
+ await page.locator('#api-key').fill('local-only-ui-fixture');
+ await page.locator('[data-action="save-api"]').click();
+ await page.locator('label[for="api-key"] .tag.green').waitFor();
+ await page.locator('#config-textProvider').selectOption('deepseek');
+ await page.locator('label[for="api-key"] .tag.gray').waitFor();
+ if(await page.locator('#api-key').inputValue())throw Error('Credential appeared in input after provider switch');
+ await page.locator('#config-textModel').fill('deepseek-ui-test-model');
+ await page.locator('[data-action="save-api"]').click();await page.waitForTimeout(150);
+ await page.locator('#config-textProvider').selectOption('ark');
+ await page.waitForFunction(()=>document.querySelector('#config-textModel')?.value==='ark-ui-test-model');
+ await page.locator('label[for="api-key"] .tag.green').waitFor();
+ await page.locator('#config-imageProvider').selectOption('openai');await page.waitForTimeout(200);
+ if(await page.locator('#config-imageProtocol').inputValue()!=='openai_edits')throw Error('OpenAI image protocol incorrect');
+ if(!await page.locator('[data-action="copy-ai-key"]').isDisabled())throw Error('Cross-provider copy button should be disabled');
+ await page.locator('#config-imageProvider').selectOption('gemini');await page.waitForTimeout(200);
+ if(await page.locator('#config-imageProtocol').inputValue()!=='gemini_image')throw Error('Gemini image protocol incorrect');
+ await page.locator('#config-imageProvider').selectOption('ark');await page.waitForTimeout(200);
+ await page.locator('[data-action="copy-ai-key"]').click();
+ await page.locator('label[for="image-api-key"] .tag.green').waitFor();
+ // Only mock the UI result renderer; the real Ark call is verified separately by live_app_ai_test.py.
+ await page.route('**/api/test-api',r=>r.fulfill({status:200,contentType:'application/json',body:JSON.stringify({ok:true,output:'OK',model:'UI result rendering fixture',seconds:1.25,serviceTier:'default',usage:{total_tokens:23}})}));
+ await page.locator('[data-action="test-api"]').click();await page.locator('.ai-test-result').waitFor();
+ await page.locator('#config-textProvider').selectOption('deepseek');await page.waitForTimeout(200);
+ if(await page.locator('.ai-test-result').count())throw Error('Stale test result shown under different provider');
+ await page.locator('#config-textProvider').selectOption('ark');await page.waitForTimeout(200);
+ await page.locator('[data-action="clear-ai-key"][data-channel="text"]').click();await page.locator('label[for="api-key"] .tag.gray').waitFor();
+ await page.locator('[data-action="clear-ai-key"][data-channel="image"]').click();await page.locator('label[for="image-api-key"] .tag.gray').waitFor();
+ await page.screenshot({path:path.resolve('tmp/ui-ai-check/ai-connections.png'),fullPage:true});
+ await page.setViewportSize({width:1024,height:768});
+ if(await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth))throw Error('Minimum desktop layout overflows');
+ if(errors.length||external.length)throw Error(JSON.stringify({errors,external}));
+ const state=await(await page.request.get('http://127.0.0.1:8766/api/state')).json();
+ if(JSON.stringify(state).includes('local-only-ui-fixture'))throw Error('Credential leaked into public state');
+ fs.writeFileSync('tmp/ui-ai-check/report.json',JSON.stringify({ok:true,presets,providerProfileRestore:true,credentialIsolation:true,imageConnectionIndependence:true,staleResultsHidden:true,credentialClear:true,errors,externalCalls:external,realProviderCalls:'verified separately'},null,2));
+ await browser.close();console.log('Multi-provider UI acceptance passed. No external requests were sent by this UI test.');
+})().catch(e=>{console.error(e);process.exitCode=1;});
