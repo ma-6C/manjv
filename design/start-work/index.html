@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <link rel="icon" href="data:,">
+  <title>开始工作 · 漫剧工坊流程原型</title>
+  <link rel="stylesheet" href="style.css">
+  <script defer src="app.js"></script>
+</head>
+<body>
+  <a class="skip" href="#main">跳到当前操作</a>
+  <div class="prototype-bar">
+    <span><strong>交互原型</strong> 全部为示例数据，不会处理或上传本机视频</span>
+    <div class="demo-controls">
+      <label for="scenario">演示场景</label>
+      <select id="scenario">
+        <option value="empty">首次开始</option>
+        <option value="sample">需要确认样片</option>
+        <option value="missing">缺少 AI 接口</option>
+        <option value="running">软件处理中</option>
+        <option value="failed">失败后继续</option>
+        <option value="review">制作完成待验片</option>
+        <option value="exported">已导出待提交</option>
+      </select>
+      <button class="text-button" id="reset">重新开始演示</button>
+    </div>
+  </div>
+  <div class="shell">
+    <aside class="sidebar" aria-label="工作台导航">
+      <div class="brand"><span class="brand-mark" aria-hidden="true">剧</span><div>漫剧工坊<small>视频制作工作台</small></div></div>
+      <p class="nav-caption">工作空间</p>
+      <nav>
+        <button class="nav-item active" data-action="home" aria-current="page"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m8 4 12 8-12 8z"/></svg>开始工作</button>
+        <button class="nav-item" data-action="assets"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6h7l2 2h9v12H3zM3 6V3h7l2 3"/></svg>素材与剧集</button>
+        <button class="nav-item" data-action="history"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 9a9 9 0 1 1 0 6M3 3v6h6M12 7v6l4 2"/></svg>任务与记录</button>
+      </nav>
+      <div class="nav-divider"></div>
+      <button class="nav-item" data-action="tools"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6h18M3 12h18M3 18h18M8 3v6M16 9v6M10 15v6"/></svg>高级工具</button>
+      <div class="sidebar-note"><span class="local-dot"></span>本地工作空间<p>选好素材和方案<br>其余交给制作计划</p></div>
+    </aside>
+    <div class="workspace">
+      <header class="page-header"><div><div class="breadcrumb">工作空间 / 开始工作</div><h1>这一部，接着往下做。</h1><p>跟着当前步骤走，软件会接手中间的制作。</p></div><button class="button" data-action="help">查看流程说明</button></header>
+      <nav class="phase-nav" aria-label="本次制作的五个阶段"><ol id="phases"></ol></nav>
+      <div class="work-area">
+        <div class="flow-column">
+          <main id="main"><div id="stage-content"></div></main>
+          <footer class="action-bar" id="action-bar"></footer>
+        </div>
+        <aside class="task-summary" aria-label="本次任务总览" id="task-summary"></aside>
+      </div>
+      <div class="research-note">方案依据：<a href="https://design-system.service.gov.uk/patterns/complete-multiple-tasks/" target="_blank" rel="noreferrer">GOV.UK 任务清单</a>、<a href="https://www.carbondesignsystem.com/building-blocks/core/components/progress-indicator/guidelines" target="_blank" rel="noreferrer">IBM Carbon 阶段导航</a>、<a href="https://www.nngroup.com/articles/wizards/" target="_blank" rel="noreferrer">NN/g 向导设计</a></div>
+    </div>
+  </div>
+  <dialog id="detail-dialog" aria-labelledby="dialog-title"><div class="dialog-head"><h2 id="dialog-title"></h2><button class="button" data-action="close-dialog">关闭</button></div><div id="dialog-content"></div></dialog>
+  <div id="announcement" class="sr-only" role="status" aria-live="polite" aria-atomic="true"></div>
+</body>
+</html>
