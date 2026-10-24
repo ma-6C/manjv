@@ -6,3 +6,8 @@ patchright>=1.60
 loguru>=0.7
 segno>=1.6
 opencv-python-headless>=4.11
+pyJianYingDraft==0.3.1
+pymediainfo==7.0.1
+imageio==2.38.1
+uiautomation==2.0.29
+comtypes==1.4.17

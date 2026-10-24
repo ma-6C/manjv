@@ -41,6 +41,9 @@ ROOT = Path(__file__).resolve().parent
 APP_HOME = Path(sys.executable).resolve().parent if getattr(sys,'frozen',False) else ROOT
 sys.path.insert(0, str(ROOT / 'vendor'))
 import track_sheets
+import vsr_pool
+import jianying_projects
+import highlight_render
 DATA = runtime_paths.data_home()
 DATA.mkdir(parents=True, exist_ok=True)
 PUBLIC = ROOT / 'web'
@@ -50,7 +53,7 @@ QUEUE_THREAD = None
 QUEUE_WAKE = threading.Event()
 QUEUE_STOP = threading.Event()
 SOURCE_MANAGER = None
-LOCAL_JOB_KINDS = {'pipeline','transcode','subtitle','preview','playback','rewrite','cover','coverAI','records','cost','highlight','package','hook','promotion_package','track_sheet'}
+LOCAL_JOB_KINDS = {'pipeline','transcode','subtitle','preview','playback','rewrite','cover','coverAI','records','cost','highlight','package','hook','promotion_package','track_sheet','jianying_project'}
 SECRETS = {'apiKey': '', 'subtitleKey': ''}
 FFMPEG = os.environ.get('FFMPEG_EXE') or shutil.which('ffmpeg')
 if not FFMPEG:
@@ -79,10 +82,12 @@ DEFAULT = {
     'subtitleEndpoint': '', 'subtitlePoll': '', 'subtitleAuto': False, 'subtitleFirst': 4,
     'subtitleRegions': [], 'pipelineHighlight': False,
     'highlightCount': 1, 'highlightMin': 2, 'highlightMax': 6, 'highlightRandom': True,
+    'highlightFixed': 4.2, 'highlightParallel': 2, 'highlightLowResource': False,
+    'highlightMusic': '', 'highlightTailEnabled': False, 'highlightTailDirectory': '', 'highlightTailChoice': 'random',
     'endingText': '', 'costTemplate': '', 'costRows': [
         {'name': '演员报酬', 'amount': 0}, {'name': '制作与剪辑', 'amount': 0},
         {'name': 'AI服务', 'amount': 0}, {'name': '音乐与素材授权', 'amount': 0}, {'name': '其他', 'amount': 0}],
-    'vsrRoot': '', 'vsrPython': '' if getattr(sys,'frozen',False) else sys.executable, 'vsrMode': 'sttn-auto',
+    'vsrRoot': '', 'vsrPython': '' if getattr(sys,'frozen',False) else sys.executable, 'vsrMode': 'sttn-auto', 'vsrReuseWorker':True,
     'sauRoot': str(ROOT/'engines'/'social-auto-upload'), 'sauPython': sys.executable,
     'uploadMode': 'draft', 'uploadSchedule': '',
 }
@@ -94,6 +99,7 @@ def read_json(path, fallback):
         return copy.deepcopy(fallback)
 
 STATE = read_json(DATA / 'state.json', {'config': DEFAULT, 'projects': [], 'accounts': [], 'logs': []})
+if 'highlightFixed' not in STATE.get('config',{}):STATE.setdefault('config',{})['highlightFixed']=STATE.get('config',{}).get('highlightMin',DEFAULT['highlightFixed'])
 STATE['config'] = DEFAULT | STATE.get('config', {})
 connections.retire_video_config(STATE['config'])
 # 同一台电脑上的独立 AI 引擎可供各版本共用，模型和密钥不打入桌面包。
@@ -114,6 +120,7 @@ except ValueError:STATE['trackSheetOptions']=track_sheets.options({})
 # 保存的任务只含非密钥配置；进程、取消信号等运行对象不会写入磁盘。
 for item in read_json(DATA / 'jobs.json', []):
     if not isinstance(item,dict) or not item.get('id') or not isinstance(item.get('config'),dict):continue
+    if 'highlightFixed' not in item['config']:item['config']['highlightFixed']=item['config'].get('highlightMin',DEFAULT['highlightFixed'])
     item['config'] = connections.retire_video_config(DEFAULT | {k:v for k,v in item['config'].items() if k in DEFAULT})
     if item.get('kind')=='video_generate':
         item['moduleRetired']=True
@@ -188,10 +195,10 @@ def validate_config(c):
     for key, lo, hi in [('segmentSeconds', 1, 3600), ('width', 64, 3840), ('height', 64, 3840),
                         ('parallel', 1, 8), ('brightness', -.2, .2), ('contrast', .8, 1.3),
                         ('saturation', 0, 2), ('speed', .5, 2), ('cropPercent', 0, 15),
-                        ('highlightCount', 1, 10), ('highlightMin', 0, 10), ('highlightMax', 0, 10),
+                        ('highlightCount', 1, 10), ('highlightMin', 0, 10), ('highlightMax', 0, 10), ('highlightFixed',0,10), ('highlightParallel',1,8),
                         ('subtitleFirst', 1, 100)]:
         number(c[key], lo, hi, key)
-    for key in ['width', 'height', 'parallel', 'highlightCount', 'subtitleFirst']:
+    for key in ['width', 'height', 'parallel', 'highlightCount', 'highlightParallel', 'subtitleFirst']:
         if float(c[key]) != int(c[key]):
             raise ValueError(f'{key}必须为整数')
         c[key] = int(c[key])
@@ -199,6 +206,7 @@ def validate_config(c):
         raise ValueError('输出宽高必须为偶数')
     if c['highlightMin'] > c['highlightMax']:
         raise ValueError('高光倍率最小值不能超过最大值')
+    highlight_render.validate(c)
     if c['markPosition'] not in ['top-left', 'top-right', 'bottom-left', 'bottom-right']:
         raise ValueError('AI标识位置无效')
     if not isinstance(c['subtitleRegions'],list) or len(c['subtitleRegions'])>8:
@@ -503,6 +511,64 @@ def track_sheet_batch(ids,cfg,jid):
     if failures:raise ValueError(f'已完成{len(results)}张工程图，{len(failures)}集失败；可重试未完成部分。'+failures[0]['name']+'：'+failures[0]['message'])
     if 'track_sheet' not in job['completedStages']:job['completedStages'].append('track_sheet')
 
+def jianying_request(body):
+    opts=jianying_projects.options(body.get('jianying',STATE.get('jianyingOptions',{})))
+    ids=body.get('ids');kind=body.get('sourceKind','original')
+    if kind=='original':
+        request,videos=track_request(body)
+    elif kind in ('final','subtitle'):
+        if not isinstance(ids,list) or not ids or len(set(ids))!=len(ids):raise ValueError('请先选择剧集')
+        videos=[{'projectId':pid,**v,**probe(v['path'])} for pid in ids for v in hook_inputs(get_project(pid),kind)]
+        if not 1<=len(videos)<=30:raise ValueError('请选择1至30个已生成视频；可以将特定成品导入素材库后自由选集')
+        request={}
+    else:raise ValueError('工程输入版本无效')
+    for video in videos:
+        st=Path(video['path']).stat();video['inputStat']={'bytes':st.st_size,'mtime':st.st_mtime_ns}
+    return request|{'jianying':opts,'jianyingVideos':videos,'sourceKind':kind},videos
+
+
+def jianying_batch(ids,cfg,jid):
+    job=JOBS[jid];opts=job['options']['jianying'];videos=job['options']['jianyingVideos'];results=job.setdefault('jianyingResults',[])
+    root=Path(opts['output'] or str(Path(cfg['output'])/'剪映工程'))
+    analysis_opts=track_sheets.options(STATE.get('trackSheetOptions',{}))
+    for index,video in enumerate(videos):
+        telemetry.batch(job,'jianying_projects','剪映真实工程',len(videos),index)
+        if job['cancel'].is_set():raise InterruptedError('工程导出已停止')
+        st=Path(video['path']).stat()
+        if video['inputStat']!={'bytes':st.st_size,'mtime':st.st_mtime_ns}:raise ValueError('工程输入视频已变化，请重新创建任务')
+        key='jianying:'+hashlib.sha256(video['path'].encode()).hexdigest()[:20]
+        old=next((r for r in results if r['sourcePath']==video['path']),None)
+        if old and cached(jid,key):
+            try:jianying_projects.check(old['directory']);continue
+            except (OSError,ValueError):pass
+        progress={'phase':None,'last':0,'tid':None}
+        def notify(phase,value,length):
+            if job['cancel'].is_set():raise InterruptedError('工程导出已停止')
+            if phase=='backend':return
+            now=time.monotonic()
+            if progress['phase']==phase and now-progress['last']<.5 and value!=length:return
+            if progress['phase']!=phase:
+                if progress['tid']:telemetry.finish(job,progress['tid'])
+                progress['tid']=telemetry.begin(job,'剪映工程 · '+phase,video['name'],length or 0,'bytes' if phase in ('copy','hash') else 'files' if phase in ('audio','draft','cache') else 'frames')
+            progress.update(phase=phase,last=now)
+            if isinstance(value,(int,float)) and isinstance(length,(int,float)):telemetry.advance(job,progress['tid'],value,length)
+            stage(jid,f'{index+1}/{len(videos)} · 剪映工程 · {video["name"]} · '+{'copy':'复制素材','audio':'提取原声','draft':'保存草稿','decode':'分析镜头','hash':'核对素材','cache':'复用镜头分析'}.get(phase,'分析视频'),index/len(videos)*90)
+        run=lambda args,observe=None,timeout=None:run_process(args,jid,observe=observe,timeout=timeout)
+        if opts['splitScenes']:
+            analysis,_,_=track_sheets.analyze(video,analysis_opts,DATA/'track-sheet-cache',FFMPEG,run,job['cancel'],notify)
+        else:analysis={'sourceSHA256':track_sheets.source_hash(Path(video['path']),job['cancel'],notify),'segments':[{'start':0,'end':video['duration']}]}
+        result=jianying_projects.generate(video,analysis,root,FFMPEG,run,job['cancel'],notify)
+        if progress['tid']:telemetry.finish(job,progress['tid'])
+        telemetry.batch(job,'jianying_projects','剪映真实工程',len(videos),index+1)
+        result.update(projectId=video['projectId'],sourcePath=video['path']);p=get_project(video['projectId'])
+        with LOCK:
+            register(p,Path(result['path']),'剪映真实工程',jid);register(p,Path(result['manifest']),'剪映工程清单',jid)
+            results[:]=[r for r in results if r['sourcePath']!=video['path']];results.append(result)
+            checkpoint(jid,key,[x for x in Path(result['directory']).rglob('*') if x.is_file()]);persist_jobs()
+    job['result']={'completed':len(results),'files':[r['path'] for r in results],'editorValidated':False}
+    if 'jianying_project' not in job['completedStages']:job['completedStages'].append('jianying_project')
+
+
 def project_dir(p, cfg):
     name = re.sub(r'[<>:"/\\|?*\x00-\x1f]', '_', p['name']).strip(' .')[:70] or '未命名'
     out = Path(cfg['output']).resolve() / f'{name}_{p["id"][:6]}'
@@ -565,7 +631,7 @@ def stage(job, label, progress):
         if JOBS[job]['cancel'].is_set():
             raise InterruptedError('任务已停止')
         item=JOBS[job]
-        count=max(1,len(item['ids']))
+        count=1 if item['kind'] in ('track_sheet','jianying_project') else max(1,len(item['ids']))
         overall=(item.get('currentIndex',0)+progress/100)/count*100
         item.update(stage=label, progress=round(overall))
         telemetry.phase(item,label)
@@ -976,7 +1042,19 @@ def vsr_subtitle(p,cfg,job):
         args+=['--inpaint-mode','sttn-det' if cfg['vsrMode']=='sttn' else cfg['vsrMode']]
         stage(job,f'本地AI去字幕：{i+1}/{len(videos)}，模型 {cfg["vsrMode"]}',10+i/len(videos)*80)
         tid=telemetry.begin(JOBS[job],'加载模型／准备字幕修复',v['name'],unit='frames')
-        run_process(args,job,cwd=root,observe=lambda line:telemetry.vsr_event(JOBS[job],tid,line),track=tid,env=os.environ|{'PYTHONUNBUFFERED':'1','PYTHONIOENCODING':'utf-8'})
+        if cfg.get('vsrReuseWorker',True) and cfg['vsrMode']=='sttn-auto':
+            coords=[[int(r['y']*h),int((r['y']+r['h'])*h),int(r['x']*w),int((r['x']+r['w'])*w)] for r in subtitle_regions(cfg)]
+            def attach(proc):
+                with LOCK:JOBS[job]['processes'].add(proc)
+            def detach(proc):
+                with LOCK:JOBS[job]['processes'].discard(proc)
+            stats=vsr_pool.POOL.run(runtime,root,{'input':v['path'],'output':str(target),'mode':cfg['vsrMode'],'regions':coords,'duration':v['duration']},JOBS[job]['cancel'],
+                observe=lambda line:telemetry.vsr_event(JOBS[job],tid,line),heartbeat=lambda:telemetry.heartbeat(JOBS[job],tid),attach=attach,detach=detach)
+            JOBS[job]['vsrWorker']=stats
+            log(('复用常驻模型' if stats['reusedProcess'] else '启动常驻模型')+f'，累计处理 {stats["completedVideos"]} 集，模型加载 {stats["modelLoads"]} 次',job=job)
+        else:
+            vsr_pool.POOL.close()
+            run_process(args,job,cwd=root,observe=lambda line:telemetry.vsr_event(JOBS[job],tid,line),track=tid,env=os.environ|{'PYTHONUNBUFFERED':'1','PYTHONIOENCODING':'utf-8'})
         telemetry.finalizing(JOBS[job],tid,'模型处理已退出，正在校验视频')
         if not target.is_file() or target.stat().st_size<128:
             raise RuntimeError('AI引擎未生成有效视频：'+v['name']+'。请检查本地引擎、模型和磁盘空间；本集未完成，已完成集数保留。')
@@ -1107,33 +1185,8 @@ def costs(p,cfg,job):
     path=out/'成本报告.docx';doc.save(path);register(p,path,'成本报告',job)
 
 def highlight(p,cfg,job):
-    import random
-    out=project_dir(p,cfg)/'高光包装'/job;out.mkdir(parents=True,exist_ok=True)
-    videos=p['videos']
-    total=len(videos)*int(cfg['highlightCount']);done=0;outputs=[]
-    for i,v in enumerate(videos):
-        for n in range(int(cfg['highlightCount'])):
-            key=f'{p["id"]}:highlight:{i}:{n}'
-            previous=cached(job,key)
-            if previous is not None:outputs.extend(previous);done+=1;continue
-            ratio=random.uniform(cfg['highlightMin'],cfg['highlightMax']) if cfg['highlightRandom'] else cfg['highlightMin']
-            target=out/f'{i+1:03d}_包装{n+1:02d}.mp4'
-            vf=filters(cfg,v,out)+f',tpad=stop_mode=clone:stop_duration={v["duration"]/cfg["speed"]*ratio}'
-            ending=cfg['endingText'].strip()
-            if ending:
-                textfile=out/'ending.txt';textfile.write_text(ending[:100],encoding='utf-8')
-                fp=FONT.replace('\\','/').replace(':','\\:')
-                tp=str(textfile).replace('\\','/').replace(':','\\:').replace("'","\\'")
-                vf+=f",drawtext=fontfile='{fp}':textfile='{tp}':fontsize={max(16,int(cfg['width']/24))}:fontcolor=white:box=1:boxcolor=black@0.6:x=(w-tw)/2:y=h*0.75:enable='gte(t,{v['duration']/cfg['speed']})'"
-            duration=v['duration']/cfg['speed']*(1+ratio)
-            args=['-i',v['path']]
-            if not v['audio']:args+=['-f','lavfi','-i','anullsrc=channel_layout=stereo:sample_rate=48000']
-            args+=['-map','0:v:0','-map','0:a:0' if v['audio'] else '1:a:0','-vf',vf,
-                   '-af','apad' if float(cfg['speed'])==1 else f'atempo={cfg["speed"]},apad',*encoder(cfg,job),'-c:a','aac','-pix_fmt','yuv420p',
-                   '-t',str(duration),'-threads','2',str(target)]
-            encode_media(args,job);register(p,target,'高光视频',job);checkpoint(job,key,[target]);outputs.append(target);done+=1
-            stage(job,f'高光包装：完成 {done}/{total} 份',10+done/total*80)
-    return outputs
+    return highlight_render.render(sys.modules[__name__],p,cfg,job)
+
 
 def promotion_hook(p,cfg,jid):
     if not p['rights']:raise ValueError('请先确认素材制作与推广授权')
@@ -1280,7 +1333,8 @@ def production_plan(kind,cfg,continuing=False):
                'highlight':('高光包装','单独处理当前成片',['highlight']),'cover':('制作封面','单独生成封面',['cover']),
                'coverAI':('AI封面','使用所选生图接口',['cover']),'records':('工程记录','单独生成记录',['records']),
                'cost':('成本报告','单独生成报告',['cost']),'rewrite':('AI文案','单独改写剧名与简介',['text']),
-               'package':('整理发布材料','导出本地材料',['package'])}
+               'package':('整理发布材料','导出本地材料',['package']),
+               'jianying_project':('剪映真实工程','复制素材并生成可编辑时间线',['jianying_project'])}
         if kind in names:steps.append(list(names[kind]))
     return steps
 
@@ -1314,7 +1368,8 @@ def worker(jid,ids,kind,cfg):
         if kind=='login':
             engine_login(cfg,jid)
         if kind=='track_sheet':track_sheet_batch(ids,cfg,jid)
-        for index,pid in enumerate(ids if kind!='track_sheet' else []):
+        if kind=='jianying_project':jianying_batch(ids,cfg,jid)
+        for index,pid in enumerate(ids if kind not in ('track_sheet','jianying_project') else []):
             job['currentIndex']=index
             base_project=get_project(pid)
             paths=job.get('options',{}).get('sourceVideoPaths',{}).get(pid)
@@ -1359,7 +1414,7 @@ def worker(jid,ids,kind,cfg):
             if kind=='hook':promotion_hook(p,cfg,jid)
             if kind=='promotion_package':promotion_package(p,cfg,jid)
             if kind=='highlight' or (kind=='pipeline' and cfg['pipelineHighlight']):
-                inputs=final_videos(p)
+                inputs=[] if kind=='highlight' and job.get('options',{}).get('highlightOriginalSelection') else final_videos(p)
                 options=cfg
                 if inputs:
                     material={**p,'videos':video_entries([a['path'] for a in inputs])}
@@ -1481,6 +1536,7 @@ def shutdown_jobs():
                     try:proc.kill()
                     except OSError:pass
         persist_jobs()
+    vsr_pool.POOL.close()
 
 def hook_inputs(p,kind):
     if kind=='original':return p['videos']
@@ -1492,7 +1548,7 @@ def job_preflight(body):
     """Validate selection and storage without queuing or contacting model providers."""
     cfg=validate_config(copy.deepcopy(STATE['config']));kind=body.get('kind','pipeline')
     if 'aiSelection' in body:cfg['aiSelection']=copy.deepcopy(body['aiSelection']);connections.validate(cfg)
-    if kind not in ('pipeline','transcode','subtitle'):raise ValueError('此制作类型不支持选集预检')
+    if kind not in ('pipeline','transcode','subtitle','highlight'):raise ValueError('此制作类型不支持选集预检')
     ids=body.get('ids',[]);requested=body.get('sourceVideoPaths')
     if not isinstance(ids,list) or not ids or not isinstance(requested,dict) or set(requested)!=set(ids):raise ValueError('请核对任务剧集和所选视频')
     videos=[]
@@ -1526,7 +1582,8 @@ def job_preflight(body):
                 interfaces.append(label+'：原配置 '+ai.connection(cfg,channel)['model'])
                 if not ai.get_key(cfg,channel):errors.append(label+'接口缺少本次会话密钥')
         except (ValueError,ai.ProviderError) as e:errors.append(label+'：'+str(e))
-    output=Path(cfg['output']).expanduser().resolve();estimate=max(256*1024**2,sum(v.get('bytes',0) for v in videos)*(3 if uses_subtitle else 2))
+    multiplier=cfg['highlightCount']*(1+(cfg['highlightMax'] if cfg['highlightRandom'] else cfg['highlightFixed']))*2 if kind=='highlight' else (3 if uses_subtitle else 2)
+    output=Path(cfg['output']).expanduser().resolve();estimate=max(256*1024**2,sum(v.get('bytes',0) for v in videos)*multiplier)
     try:
         for pid in ids:project_dir(get_project(pid),cfg)
         check_storage(output,estimate)
@@ -1575,7 +1632,11 @@ def create_job(body):
             if not files:raise ValueError('原分集文件或检查点已失效，不能继续后续制作')
             options['continuedVideoFiles'][pid]=[{'path':str(path),'bytes':path.stat().st_size,'mtime':path.stat().st_mtime_ns} for path in files]
             continued_video_files(options,pid)
-    if kind=='track_sheet':
+    if kind=='jianying_project':
+        options,_=jianying_request(body)
+        if not jianying_projects.status(options['jianying'])['available']:raise ValueError('剪映草稿组件未安装')
+        with LOCK:STATE['jianyingOptions']=copy.deepcopy(options['jianying']);save()
+    elif kind=='track_sheet':
         options,_=track_request(body)
         plan=track_plan(body)
         if not plan['ok']:raise ValueError('；'.join(plan['errors']))
@@ -1591,6 +1652,7 @@ def create_job(body):
             if len(paths)!=len(set(paths)):raise ValueError('制作集数重复')
             fixed[pid]=list(paths)
         options['sourceVideoPaths']=fixed
+        if kind=='highlight':options['highlightOriginalSelection']=requested is not None
         # New standalone tasks cover every selected file in full. Persist this
         # option in the job so historical first-N tasks retain their own scope.
         if kind=='subtitle':options['subtitleAllSelected']=True
@@ -1598,6 +1660,7 @@ def create_job(body):
             preflight=job_preflight(body|{'sourceVideoPaths':fixed})
             if not preflight['ok']:raise ValueError('；'.join(preflight['errors']))
     elif 'sourceVideoPaths' in body:raise ValueError('此制作类型不支持指定源视频集数')
+    if kind=='highlight':highlight_render.validate(cfg,True)
     if kind=='hook':
         if len(ids)!=1:raise ValueError('一次请选择一部剧制作钩子')
         p=get_project(ids[0])
@@ -1805,6 +1868,20 @@ class Handler(BaseHTTPRequestHandler):
             if path=='/api/license/activate':return self.reply(value=licensing.activate(DATA,body.get('token','')))
             licensing.require(DATA)
             if path=='/api/tracks/import':return self.reply(value=import_track_files(body.get('paths')))
+            if path=='/api/jianying/status':return self.reply(value=jianying_projects.status(body.get('jianying',STATE.get('jianyingOptions',{}))))
+            if path=='/api/jianying/plan':
+                options,videos=jianying_request(body)
+                return self.reply(value={'count':len(videos),'duration':sum(v['duration'] for v in videos),'sourceKind':options['sourceKind'],'editorValidated':False})
+            if path=='/api/jianying/open':
+                job=JOBS.get(body.get('id'));index=body.get('index',0)
+                if not job or job['kind']!='jianying_project' or type(index) is not int or not 0<=index<len(job.get('jianyingResults',[])):raise ValueError('没有对应的剪映工程')
+                target=Path(job['jianyingResults'][index]['directory']);jianying_projects.check(target)
+                if os.name=='nt':os.startfile(str(target))
+                return self.reply(value={'directory':str(target)})
+            if path=='/api/jianying/relocate':return self.reply(value=jianying_projects.relocate(body.get('directory','')))
+            if path=='/api/highlight/templates':
+                cfg=validate_config(STATE['config']|{'highlightTailDirectory':body.get('directory',STATE['config']['highlightTailDirectory'])})
+                return self.reply(value={'files':[p.name for p in highlight_render.templates(cfg)]})
             if path=='/api/tracks/plan':return self.reply(value=track_plan(body))
             if path=='/api/tracks/options':
                 with LOCK:STATE['trackSheetOptions']=track_sheets.options(body);save()
@@ -2019,11 +2096,11 @@ class Handler(BaseHTTPRequestHandler):
                     if proc.returncode:raise ValueError('视频选择窗口未能打开，可以在文件名工具中粘贴本地路径')
                     return self.reply(value={'paths':json.loads(proc.stdout.decode('utf-8-sig','replace').strip() or '[]')})
                 script="Add-Type -AssemblyName System.Windows.Forms; "
-                if mode in ['template','python','image','engine']:
-                    script+="$d=New-Object System.Windows.Forms.OpenFileDialog; $d.Filter='"+('AI engine (*.zip)|*.zip' if mode=='engine' else 'Word template (*.docx)|*.docx' if mode=='template' else 'Images (*.jpg;*.jpeg;*.png;*.webp)|*.jpg;*.jpeg;*.png;*.webp' if mode=='image' else 'Python runtime (*.exe)|*.exe')+"';"
+                if mode in ['template','python','image','engine','audio']:
+                    script+="$d=New-Object System.Windows.Forms.OpenFileDialog; $d.Filter='"+('Audio|*.mp3;*.wav;*.m4a;*.aac;*.flac;*.ogg' if mode=='audio' else 'AI engine (*.zip)|*.zip' if mode=='engine' else 'Word template (*.docx)|*.docx' if mode=='template' else 'Images (*.jpg;*.jpeg;*.png;*.webp)|*.jpg;*.jpeg;*.png;*.webp' if mode=='image' else 'Python runtime (*.exe)|*.exe')+"';"
                 else:script+="$d=New-Object System.Windows.Forms.FolderBrowserDialog; $d.Description='选择文件夹';"
                 script+="if($d.ShowDialog() -eq 'OK'){"
-                script+="[Console]::OutputEncoding=[System.Text.Encoding]::UTF8; Write-Output $d."+('FileName' if mode in ['template','python','image','engine'] else 'SelectedPath')+'}'
+                script+="[Console]::OutputEncoding=[System.Text.Encoding]::UTF8; Write-Output $d."+('FileName' if mode in ['template','python','image','engine','audio'] else 'SelectedPath')+'}'
                 proc=subprocess.run(['powershell','-NoProfile','-STA','-Command',script],capture_output=True,timeout=180,
                     creationflags=getattr(subprocess,'CREATE_NO_WINDOW',0))
                 return self.reply(value={'path':proc.stdout.decode('utf-8-sig','replace').strip()})

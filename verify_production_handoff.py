@@ -35,7 +35,7 @@ pid=s.scan(str(source))['projects'][0]['id'];project=s.get_project(pid);project[
 paths=[v['path'] for v in project['videos']];source_hashes={p:s.sha256(p) for p in paths}
 s.STATE['config'].update(output=str(BASE/'output'),width=320,height=180,segmentSeconds=1,parallel=1,gpu=False,
     regroup=True,subtitleAuto=True,subtitleMode='local',autoText=False,autoCover=True,autoAICover=False,autoRecords=True,autoCost=True,
-    pipelineHighlight=True,highlightCount=1,highlightMin=.1,highlightMax=.1,highlightRandom=False)
+    pipelineHighlight=True,highlightCount=1,highlightFixed=.1,highlightMin=.1,highlightMax=.1,highlightRandom=False)
 s.STATE['config']['costRows']=[{'name':'合成验收费用','amount':1}]
 events=[];real_stage=s.stage
 def stage(jid,label,progress):events.append((jid,label));return real_stage(jid,label,progress)

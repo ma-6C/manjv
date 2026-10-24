@@ -45,7 +45,7 @@ try:
     except ValueError as error:check('missing_engine_rejected_before_enqueue','本地AI去字幕引擎' in str(error))
     else:raise AssertionError('Missing engine accepted')
     engine=json.loads((ROOT/'engines/vsr-install.json').read_text('utf-8'))
-    s.STATE['config'].update(subtitleMode='vsr',vsrRoot=engine['root'],vsrPython=engine['python'],vsrMode='sttn-auto')
+    s.STATE['config'].update(subtitleMode='vsr',vsrRoot=engine['root'],vsrPython=engine['python'],vsrMode='sttn-auto',vsrReuseWorker=False)
     # Controlled engine failures use real playable inputs; no model calls here.
     broken=create(pid,sourceVideoPaths={pid:[paths[0]]})
     with patch.object(s,'run_process',lambda *a,**k:b''):run(broken)
@@ -89,7 +89,7 @@ try:
         s.ff(['-i',str(source),'-vf','scale=640:368','-c:v','libx264','-preset','fast','-crf','18','-c:a','aac',str(short)])
         real_pid=s.scan(str(real))['projects'][0]['id'];real_project=s.get_project(real_pid);real_project['rights']=True
         roi={'x':360/1254,'y':599/720,'w':535/1254,'h':47/720}
-        s.STATE['config'].update(subtitleRegions=[roi],subtitleRegion=roi,subtitleFirst=1)
+        s.STATE['config'].update(subtitleRegions=[roi],subtitleRegion=roi,subtitleFirst=1,vsrReuseWorker=True)
         real_job=create(real_pid);run(real_job)
         check('real_sttn_whole_series_completed',real_job['status']=='completed')
         artifacts=[a for a in real_project['artifacts'] if a['job']==real_job['id'] and a['kind']=='AI字幕处理']

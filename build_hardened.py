@@ -9,7 +9,7 @@ if not re.fullmatch(r'v\d+\.\d+\.\d+',version):raise ValueError('版本号无效
 STAGE=ROOT/('tmp/hardened-stage-'+version);STAGE.mkdir(parents=True,exist_ok=True)
 DIST=ROOT/'release'/version/'漫剧工坊'
 if (DIST/'data').exists():raise RuntimeError('构建目录含用户数据，请改用新的版本目录')
-MODULES=['server','ai_providers','api_connections','media_download','engine_bridge','licensing','win_security','release_key','runtime_paths','local_session','engine_manager','promotions','task_progress','hongguo_source','guoapp_source','official_hongguo_share','source_imports','episode_selection','gpu_encoding','track_sheets']
+MODULES=['server','ai_providers','api_connections','media_download','engine_bridge','licensing','win_security','release_key','runtime_paths','local_session','engine_manager','promotions','task_progress','hongguo_source','guoapp_source','official_hongguo_share','source_imports','episode_selection','gpu_encoding','track_sheets','jianying_projects','highlight_render','vsr_pool']
 for module in MODULES:shutil.copy2(ROOT/(module+'.py'),STAGE/(module+'.py'))
 shutil.copy2(ROOT/'desktop.py',STAGE/'desktop.py')
 imports=set()
@@ -32,8 +32,9 @@ from PyInstaller.__main__ import run
 args=[str(STAGE/'desktop.py'),'--name','漫剧工坊','--noconsole','--onedir','--noconfirm','--clean','--distpath',str(DIST.parent),'--workpath',str(ROOT/('tmp/pyinstaller-hardened-'+version)),'--specpath',str(STAGE),'--paths',str(STAGE),'--paths',str(ROOT/'vendor'),'--icon',str(ROOT/'assets/app.ico')]
 for folder in ['web','assets']:args+=['--add-data',str(ROOT/folder)+os.pathsep+folder]
 args+=['--add-data',str(ROOT/'engines/guoapp-core')+os.pathsep+'engines/guoapp-core']
+args+=['--add-data',str(ROOT/'engines/jianying-draft')+os.pathsep+'engines/jianying-draft']
 for folder in ['uploader','utils','conf.py','LICENSE']:args+=['--add-data',str(ROOT/'engines/social-auto-upload'/folder)+os.pathsep+('engines/social-auto-upload' if '.' in folder or folder=='LICENSE' else 'engines/social-auto-upload/'+folder)]
-for module in ['webview','pythonnet','clr_loader','imageio_ffmpeg','patchright','segno','cv2','loguru']:args+=['--collect-all',module]
+for module in ['webview','pythonnet','clr_loader','imageio_ffmpeg','patchright','segno','cv2','loguru','pyJianYingDraft','pymediainfo','imageio','uiautomation','comtypes']:args+=['--collect-all',module]
 for module in MODULES+['webview.platforms.edgechromium','webview.platforms.winforms','package_imports']:args+=['--hidden-import',module]
 run(args)
 for cached in list(DIST.rglob('*.pyc')):

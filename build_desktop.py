@@ -22,6 +22,7 @@ run([
     '--add-data',str(ROOT/'web')+os.pathsep+'web',
     '--add-data',str(ROOT/'assets')+os.pathsep+'assets',
     '--add-data',str(ROOT/'engines/guoapp-core')+os.pathsep+'engines/guoapp-core',
+    '--add-data',str(ROOT/'engines/jianying-draft')+os.pathsep+'engines/jianying-draft',
     '--add-data',str(ROOT/'engines/social-auto-upload/uploader')+os.pathsep+'engines/social-auto-upload/uploader',
     '--add-data',str(ROOT/'engines/social-auto-upload/utils')+os.pathsep+'engines/social-auto-upload/utils',
     '--add-data',str(ROOT/'engines/social-auto-upload/conf.py')+os.pathsep+'engines/social-auto-upload',
@@ -29,5 +30,6 @@ run([
     '--collect-all','webview','--collect-all','pythonnet','--collect-all','clr_loader',
     '--collect-all','imageio_ffmpeg','--collect-all','patchright','--collect-all','segno',
     '--collect-all','cv2','--collect-all','loguru','--hidden-import','webview.platforms.edgechromium',
+    '--collect-all','pyJianYingDraft','--collect-all','pymediainfo','--collect-all','imageio','--collect-all','uiautomation','--collect-all','comtypes',
     '--hidden-import','webview.platforms.winforms','--hidden-import','engine_bridge','--hidden-import','official_hongguo_share',
 ])
