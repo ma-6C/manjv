@@ -29,7 +29,7 @@ import zipfile
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import ai_providers as ai
 import api_connections as connections
-import video_api
+import media_download
 import promotions
 import task_progress as telemetry
 import hongguo_source
@@ -50,7 +50,7 @@ QUEUE_THREAD = None
 QUEUE_WAKE = threading.Event()
 QUEUE_STOP = threading.Event()
 SOURCE_MANAGER = None
-LOCAL_JOB_KINDS = {'pipeline','transcode','subtitle','preview','playback','video_generate','rewrite','cover','coverAI','records','cost','highlight','package','hook','promotion_package','track_sheet'}
+LOCAL_JOB_KINDS = {'pipeline','transcode','subtitle','preview','playback','rewrite','cover','coverAI','records','cost','highlight','package','hook','promotion_package','track_sheet'}
 SECRETS = {'apiKey': '', 'subtitleKey': ''}
 FFMPEG = os.environ.get('FFMPEG_EXE') or shutil.which('ffmpeg')
 if not FFMPEG:
@@ -95,6 +95,7 @@ def read_json(path, fallback):
 
 STATE = read_json(DATA / 'state.json', {'config': DEFAULT, 'projects': [], 'accounts': [], 'logs': []})
 STATE['config'] = DEFAULT | STATE.get('config', {})
+connections.retire_video_config(STATE['config'])
 # 同一台电脑上的独立 AI 引擎可供各版本共用，模型和密钥不打入桌面包。
 portable_engine=engine_manager.active(DATA)
 if portable_engine:
@@ -113,7 +114,11 @@ except ValueError:STATE['trackSheetOptions']=track_sheets.options({})
 # 保存的任务只含非密钥配置；进程、取消信号等运行对象不会写入磁盘。
 for item in read_json(DATA / 'jobs.json', []):
     if not isinstance(item,dict) or not item.get('id') or not isinstance(item.get('config'),dict):continue
-    item['config'] = DEFAULT | {k:v for k,v in item['config'].items() if k in DEFAULT}
+    item['config'] = connections.retire_video_config(DEFAULT | {k:v for k,v in item['config'].items() if k in DEFAULT})
+    if item.get('kind')=='video_generate':
+        item['moduleRetired']=True
+        if item.get('status') not in ('completed','failed','cancelled'):
+            item.update(status='cancelled',stage='视频生成功能已移除，已停止本机查询；如有云端任务请到服务商核对。',finished=time.time())
     if item.get('status') in ['queued','running','pausing']:
         item.update(status='interrupted',stage='上次运行已中断，确认后继续',interruptedAt=time.time())
     item.update(cancel=threading.Event(),processes=set())
@@ -617,42 +622,6 @@ def trace_connection(jid,event):
         log(f'接口「{event["name"]}」{event["event"]}：{event.get("detail","")}',job=jid,level='warning' if event['event'] in ['failed','fallback'] else 'info')
 
 
-def generate_video(cfg,jid):
-    job=JOBS[jid];spec=job['options']['video'];job['project']=spec['name']
-    key='generated-video'
-    if cached(jid,key) is not None:return
-    stat=job['options'].get('referenceStat')
-    if stat and not job.get('remoteVideo',{}).get('taskId'):
-        path=Path(spec['reference'])
-        if not path.is_file() or path.stat().st_size!=stat['bytes'] or path.stat().st_mtime_ns!=stat['mtime']:
-            raise ValueError('参考图片已改变，请核对后创建新任务')
-    def record(remote):
-        with LOCK:job['remoteVideo']=remote;persist_jobs()
-    telemetry.phase(job,'准备提交／查询原云端任务')
-    def cloud_progress(connection,status):
-        labels={'queued':'云端排队中','pending':'云端排队中','running':'云端生成中','processing':'云端生成中','submitted':'已提交云端','succeeded':'云端生成完成'}
-        label=connection['name']+' · '+labels.get(status,status)
-        if job.get('stage')!=label:stage(jid,label,45 if status!='succeeded' else 75)
-        telemetry.heartbeat(job)
-    url,c=video_api.generate(cfg,spec,job.get('remoteVideo'),record,job['cancel'],cloud_progress)
-    safe=re.sub(r'[<>:"/\\|?*\x00-\x1f]','_',spec['name']).strip(' .') or 'AI视频'
-    out=Path(cfg['output'])/'AI生成'/f'{safe}_{jid}';out.mkdir(parents=True,exist_ok=True)
-    target=out/'生成视频.mp4';stage(jid,'下载生成视频',85)
-    tid=telemetry.begin(job,'下载生成视频',unit='bytes')
-    video_api.download(url,target,job['cancel'],progress=lambda n,total:telemetry.advance(job,tid,n,total))
-    telemetry.finalizing(job,tid,'下载完成，正在校验成片')
-    meta=probe(target);pid=hashlib.sha256(str(out).casefold().encode()).hexdigest()[:16]
-    with LOCK:
-        p=next((p for p in STATE['projects'] if p['id']==pid),None)
-        if p is None:
-            p={'id':pid,'source':str(out),'name':spec['name'],'originalName':spec['name'],'intro':spec['prompt'],'originalIntro':spec['prompt'],
-               'cover':'','videos':[{'path':str(target),'name':target.name,'bytes':target.stat().st_size,**meta}],
-               'status':'已处理','artifacts':[],'review':'待准备','rights':False,'notes':'API生成视频，可继续进行分集、字幕处理、封面与包装。'}
-            STATE['projects'].append(p)
-        register(p,target,'生成视频',jid);set_final(p,[target],jid)
-        job['result']={'path':str(target),'projectId':pid,'connectionId':c['id'],'connectionName':c['name'],'model':c['model'],**meta}
-        checkpoint(jid,key,[target]);telemetry.finish(job,tid);save()
-
 def get_frame(video, path, at=0, job=None):
     ff(['-ss', str(max(0, at)), '-i', str(video), '-frames:v', '1', '-update', '1', str(path)], job)
 
@@ -954,7 +923,7 @@ def cloud_subtitle(p,cfg,job):
             JOBS[job]['cancel'].wait(3)
             result=ai.request_json(c['base']+c['pollPath'],{'task_id':remote['result']['task_id']},connections.require_key(cfg,c))
         url=result.get('video_url','');target=out/f'第{i+1:03d}集.mp4'
-        video_api.download(url,target,JOBS[job]['cancel']);probe(target);register(p,target,'AI字幕处理',job);checkpoint(job,key,[target]);outputs.append(target)
+        media_download.download(url,target,JOBS[job]['cancel']);probe(target);register(p,target,'AI字幕处理',job);checkpoint(job,key,[target]);outputs.append(target)
         connections.report(cfg,c,'succeeded');stage(job,f'云端字幕完成 {i+1}/{len(p["videos"])}',15+(i+1)/len(p['videos'])*70)
     return outputs
 
@@ -1344,7 +1313,6 @@ def worker(jid,ids,kind,cfg):
         if job.get('sourceSnapshot')!=source_snapshot(ids,job.get('options',{}).get('sourceVideoPaths')):raise ValueError('源素材已修改或移动，请核对后创建新任务；本任务检查点保留')
         if kind=='login':
             engine_login(cfg,jid)
-        if kind=='video_generate':generate_video(cfg,jid)
         if kind=='track_sheet':track_sheet_batch(ids,cfg,jid)
         for index,pid in enumerate(ids if kind!='track_sheet' else []):
             job['currentIndex']=index
@@ -1481,6 +1449,7 @@ def control_job(jid,action):
         job=JOBS.get(jid)
         if not job:raise ValueError('任务不存在')
         if action=='resume':
+            if job['kind']=='video_generate':raise ValueError('视频生成功能已移除，历史任务不能恢复；已有视频仍可使用')
             if job['kind'] not in LOCAL_JOB_KINDS:raise ValueError('登录或上传任务不能自动恢复，请在发布页重新核对并发起')
             if job['status'] not in ['paused','interrupted','failed','cancelled']:raise ValueError('该任务不能恢复')
             if job.get('sourceSnapshot')!=source_snapshot(job['ids'],job.get('options',{}).get('sourceVideoPaths')):raise ValueError('源素材已改变，请创建新任务；未复用旧检查点')
@@ -1576,7 +1545,7 @@ def create_job(body):
     if kind not in LOCAL_JOB_KINDS|{'login','upload'}:
         raise ValueError('未知任务类型')
     ids=body.get('ids',[])
-    if not ids and kind not in ['login','video_generate']:raise ValueError('请先勾选至少一部剧')
+    if not ids and kind!='login':raise ValueError('请先勾选至少一部剧')
     account_ids=body.get('accountIds',[])
     if kind in ['upload','login']:
         if not account_ids:raise ValueError('请至少选择一个账号')
@@ -1654,13 +1623,6 @@ def create_job(body):
         if row['projectId']!=ids[0] or row['status']=='cancelled':raise ValueError('推广任务与剧集不匹配或已取消')
         if not get_project(ids[0])['rights']:raise ValueError('请先确认素材授权')
         options={'promotionTask':copy.deepcopy(row)}
-    if kind=='video_generate':
-        if ids:raise ValueError('AI视频生成不需要选择已有剧集')
-        options={'video':video_api.validate_spec(body.get('video',{}))}
-        spec=options['video']
-        if not connections.candidates(cfg,'video'):raise ValueError('请先添加并选择视频生成连接')
-        if spec['mode']=='image' and not spec['reference'].startswith('https://'):
-            stat=Path(spec['reference']).stat();options['referenceStat']={'bytes':stat.st_size,'mtime':stat.st_mtime_ns}
     if kind in ['preview','playback']:
         if len(ids)!=1:raise ValueError('一次只试处理一部剧的视频')
         index=body.get('videoIndex',0)
@@ -1947,11 +1909,8 @@ class Handler(BaseHTTPRequestHandler):
                 with LOCK:
                     cfg=copy.deepcopy(STATE['config']);items=cfg['aiConnections'];action=body.get('action','upsert');cid=body.get('id') or body.get('connection',{}).get('id')
                     old=next((c for c in items if c['id']==cid),None)
-                    pending_cloud=any(j['status'] in ['queued','running','pausing','paused','interrupted','failed'] and
-                        j.get('remoteVideo',{}).get('connection',{}).get('id')==cid and j.get('remoteVideo',{}).get('status') not in ['failed','rejected'] for j in JOBS.values())
                     if action=='delete':
                         if not old:raise ValueError('连接不存在')
-                        if pending_cloud:raise ValueError('该连接关联待查询的云端任务，请完成查询或停止该任务后再移除')
                         if any(j['status'] in ['queued','running','pausing'] and any(c['id']==cid for c in j['config'].get('aiConnections',[])) for j in JOBS.values()):raise ValueError('队列中有使用这份接口配置的任务，请先暂停或停止后再移除')
                         cfg['aiConnections']=[c for c in items if c['id']!=cid]
                         for channel,rule in cfg['aiRouting'].items():
@@ -1964,7 +1923,6 @@ class Handler(BaseHTTPRequestHandler):
                         cfg['aiConnections']=[c for c in items if c['id']!=entry['id']]+[entry]
                         connections.validate(cfg)
                         saved=next(c for c in cfg['aiConnections'] if c['id']==entry['id'])
-                        if pending_cloud and old and any(saved[k]!=old[k] for k in ['base','protocol','provider']):raise ValueError('该连接有关联云端任务，暂不能更改平台、地址或协议；可另建连接')
                         if old and old['channel']!=saved['channel']:raise ValueError('编辑时不能改变连接用途，请另建连接')
                         rule=cfg['aiRouting'][saved['channel']]
                         if not rule['primary']:rule['primary']=saved['id']
@@ -1988,8 +1946,8 @@ class Handler(BaseHTTPRequestHandler):
                     if c['channel']=='text':
                         result=ai.text_generate(selected,'你是连接测试助手。','请仅回复OK。',64)
                         result={'ok':True,'method':'text_call','output':ai.redact(result['text']),'model':ai.redact(result['model'])}
-                    elif c['channel'] in ['image','video']:
-                        models=ai.list_models(selected,c['channel']);result={'ok':True,'method':'model_list','models':models[:20],'modelFound':c['model'] in models,'note':'仅验证模型列表，不代表已实际生成图片或视频'}
+                    elif c['channel']=='image':
+                        models=ai.list_models(selected,c['channel']);result={'ok':True,'method':'model_list','models':models[:20],'modelFound':c['model'] in models,'note':'仅验证模型列表，不代表已实际生成图片'}
                     else:raise ValueError('字幕适配器请用5秒样片试处理，接口没有统一无素材测试契约')
                     result.update(seconds=round(time.monotonic()-started,3),testedAt=time.time())
                 except Exception as error:
@@ -1997,15 +1955,6 @@ class Handler(BaseHTTPRequestHandler):
                     raise
                 with LOCK:STATE.setdefault('aiConnectionTests',{})[c['id']]=result;save()
                 return self.reply(value=result)
-            if path=='/api/jobs/attach-remote':
-                with LOCK:
-                    job=JOBS.get(body.get('id'));task_id=body.get('taskId','')
-                    if not job or job['kind']!='video_generate' or job['status'] not in ['failed','paused','interrupted']:raise ValueError('只可为已暂停或失败的视频生成任务补充任务ID')
-                    if not re.fullmatch(r'[A-Za-z0-9_.:-]{1,200}',task_id):raise ValueError('云端任务ID格式无效')
-                    remote=job.get('remoteVideo',{})
-                    if remote.get('taskId') or not remote.get('connection'):raise ValueError('该任务已有云端ID，或尚未提交')
-                    job['remoteVideo']={**remote,'taskId':task_id,'status':'submitted'};persist_jobs()
-                return self.reply(value={'attached':True})
             if path=='/api/scan':return self.reply(value=scan(body.get('source','')))
             if path=='/api/project':
                 with LOCK:

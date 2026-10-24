@@ -3,7 +3,7 @@ from pathlib import Path
 import base64,io,json,os,shutil,sys,threading,urllib.parse
 import server
 import ai_providers as ai
-import video_api
+import media_download
 from test_workflow_host import TestHandler
 BASE=Path(os.environ['MANJU_DATA']).parent;FIXTURE=BASE/'fixtures';FIXTURE.mkdir(parents=True,exist_ok=True)
 SOURCE=FIXTURE/'原始样片';SOURCE.mkdir(exist_ok=True);VIDEO=SOURCE/'01.mp4'
@@ -19,7 +19,7 @@ def request(url,payload=None,key='',protocol='chat',**kwargs):
     with LOCK:
         data=read();data['requests'].append({'path':urllib.parse.urlsplit(url).path,'model':payload.get('model') if payload else None,'account':'primary' if key=='fixture-secret-primary' else 'other'})
         try:
-            if url.endswith('/models'):return {'data':[{'id':'fixture-text'},{'id':'fixture-video'},{'id':'fixture-image'}]}
+            if url.endswith('/models'):return {'data':[{'id':'fixture-text'},{'id':'fixture-image'}]}
             if url.endswith('/chat/completions'):
                 if key=='fixture-secret-primary':raise ai.ProviderError('fixture rate limit','RateLimit',429)
                 data['textCalls']+=1;n=data['textCalls'];title=['月光守护之约','星河寻光之旅','晨曦归家之路'][n%3]
@@ -27,21 +27,13 @@ def request(url,payload=None,key='',protocol='chat',**kwargs):
             if '/images/generations' in url:return {'data':[{'b64_json':png}]}
             if url.endswith('/video/clear'):return {'task_id':'fixture-subtitle','status':'running'}
             if url.endswith('/video/status'):return {'status':'completed','video_url':'https://cdn.mock.invalid/result.mp4'}
-            if payload is not None and (url.endswith('/contents/generations/tasks') or url.endswith('/videos')):
-                task='fixture-task-'+str(len(data['created'])+1);data['created'].append({'id':task,'model':payload['model'],'hasImage':bool(payload.get('image_url') or len(payload.get('content',[]))>1)})
-                if key=='fixture-secret-timeout':raise ai.ProviderError('fixture lost response after accepted submission','NetworkError')
-                return {'id':task}
-            if payload is None:
-                task=url.rsplit('/',1)[-1];data['polls'][task]=data['polls'].get(task,0)+1
-                if data['polls'][task]<3:return {'status':'running'}
-                return {'status':'succeeded','content':{'video_url':'https://cdn.mock.invalid/result.mp4'}}
             raise AssertionError('Unexpected fixture protocol')
         finally:JOURNAL.write_text(json.dumps(data,ensure_ascii=False,indent=2),'utf-8')
 def download(url,target,cancel,**kwargs):
     if url!='https://cdn.mock.invalid/result.mp4':raise AssertionError('Unexpected fixture media URL')
     if cancel.is_set():raise InterruptedError('fixture download paused')
     shutil.copy2(VIDEO,target)
-ai.request_json=request;video_api.download=download
+ai.request_json=request;media_download.download=download
 port=int(sys.argv[1]);meta={'url':f'http://127.0.0.1:{port}','base':str(BASE),'source':str(SOURCE),'reference':str(ref),'simulation':True}
 (BASE/'service.json').write_text(json.dumps(meta,ensure_ascii=False,indent=2),'utf-8')
 server.ThreadingHTTPServer(('127.0.0.1',port),TestHandler).serve_forever()

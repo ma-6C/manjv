@@ -9,7 +9,7 @@ if not re.fullmatch(r'v\d+\.\d+\.\d+',version):raise ValueError('版本号无效
 STAGE=ROOT/('tmp/hardened-stage-'+version);STAGE.mkdir(parents=True,exist_ok=True)
 DIST=ROOT/'release'/version/'漫剧工坊'
 if (DIST/'data').exists():raise RuntimeError('构建目录含用户数据，请改用新的版本目录')
-MODULES=['server','ai_providers','api_connections','video_api','engine_bridge','licensing','win_security','release_key','runtime_paths','local_session','engine_manager','promotions','task_progress','hongguo_source','guoapp_source','official_hongguo_share','source_imports','episode_selection','gpu_encoding','track_sheets']
+MODULES=['server','ai_providers','api_connections','media_download','engine_bridge','licensing','win_security','release_key','runtime_paths','local_session','engine_manager','promotions','task_progress','hongguo_source','guoapp_source','official_hongguo_share','source_imports','episode_selection','gpu_encoding','track_sheets']
 for module in MODULES:shutil.copy2(ROOT/(module+'.py'),STAGE/(module+'.py'))
 shutil.copy2(ROOT/'desktop.py',STAGE/'desktop.py')
 imports=set()

@@ -3,11 +3,19 @@ from __future__ import annotations
 import copy,re,time
 import ai_providers as ai
 
-CHANNELS={'text':'文字','image':'封面生图','video':'视频生成','subtitle':'云端字幕'}
+CHANNELS={'text':'文字','image':'封面生图','subtitle':'云端字幕'}
 PROTOCOLS={'text':ai.TEXT_PROTOCOLS,'image':ai.IMAGE_PROTOCOLS,
-           'video':{'ark_video','dashscope_video','json_video'},'subtitle':{'subtitle_json'}}
+           'subtitle':{'subtitle_json'}}
 FIELDS={'id','name','channel','provider','protocol','base','model','enabled','tier','thinking','size','submitPath','pollPath'}
 TRACE_CALLBACKS={}
+
+def retire_video_config(cfg):
+    """Migrate saved configuration only; new video connections remain invalid."""
+    entries=cfg.get('aiConnections')
+    if isinstance(entries,list):cfg['aiConnections']=[c for c in entries if not isinstance(c,dict) or c.get('channel')!='video']
+    for field in ('aiRouting','aiSelection'):
+        if isinstance(cfg.get(field),dict):cfg[field].pop('video',None)
+    return cfg
 
 def validate(cfg):
     entries=cfg.get('aiConnections',[])
@@ -30,10 +38,9 @@ def validate(cfg):
         c.setdefault('tier','default');c.setdefault('thinking','default');c.setdefault('size','1024x1536')
         if c['tier'] not in ['default','auto','fast','flex'] or c['thinking'] not in ['default','disabled','enabled']:raise ValueError('推理参数无效')
         if not isinstance(c['size'],str) or len(c['size'])>40:raise ValueError('图片尺寸参数无效')
-        for key,default in [('submitPath','/videos' if c['channel']=='video' else '/video/clear'),('pollPath','/videos/{id}' if c['channel']=='video' else '/video/status')]:
+        for key,default in [('submitPath','/video/clear'),('pollPath','/video/status')]:
             path=c.setdefault(key,default)
             if not isinstance(path,str) or not re.fullmatch(r'/[A-Za-z0-9_./{}-]{0,180}',path) or path.startswith('//') or '..' in path:raise ValueError('提交/查询路径须为同一接口下的相对路径')
-        if c['channel']=='video' and c['protocol']=='json_video' and c['pollPath'].count('{id}')!=1:raise ValueError('视频查询路径需包含一个 {id}')
         clean.append(c)
     cfg['aiConnections']=clean
     routing=cfg.get('aiRouting',{});selection=cfg.get('aiSelection',{})
@@ -57,6 +64,7 @@ def bound(cfg,c):
     return options
 
 def candidates(cfg,channel):
+    if channel not in CHANNELS:raise ValueError('接口用途无效或已移除')
     chosen=cfg.get('aiSelection',{}).get(channel,'auto')
     entries=[c for c in cfg.get('aiConnections',[]) if c['channel']==channel]
     if chosen=='legacy' or (chosen=='auto' and not entries):return []
