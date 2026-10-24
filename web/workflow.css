@@ -36,3 +36,4 @@
 .production-options .check-row{padding:14px 0}.production-handoff{padding:18px 20px;margin-top:20px;border:1px solid var(--line);border-radius:10px;background:#faf9fd}
 .production-handoff>strong{font-size:14px}.production-handoff>p{margin-top:8px;color:var(--muted);font-size:12px;line-height:1.8}.production-handoff.failed{border-color:#ebcbd1}
 .production-run-actions{display:flex;gap:10px;flex-wrap:wrap}.production-run-actions .button{min-height:42px}
+.subtitle-full-actions .button{min-height:44px}.subtitle-full-actions{flex-wrap:wrap}#subtitle-full-result .file-list{margin-top:16px}

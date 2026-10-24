@@ -1009,9 +1009,20 @@ def vsr_subtitle(p,cfg,job):
         tid=telemetry.begin(JOBS[job],'加载模型／准备字幕修复',v['name'],unit='frames')
         run_process(args,job,cwd=root,observe=lambda line:telemetry.vsr_event(JOBS[job],tid,line),track=tid,env=os.environ|{'PYTHONUNBUFFERED':'1','PYTHONIOENCODING':'utf-8'})
         telemetry.finalizing(JOBS[job],tid,'模型处理已退出，正在校验视频')
-        if not target.is_file():raise RuntimeError('字幕引擎未输出视频，请检查引擎依赖和模型权重')
-        meta=probe(target)
-        if abs(meta['duration']-v['duration'])>.3:raise RuntimeError('AI输出时长与源视频不符，已保留现场，请重试当前视频')
+        if not target.is_file() or target.stat().st_size<128:
+            raise RuntimeError('AI引擎未生成有效视频：'+v['name']+'。请检查本地引擎、模型和磁盘空间；本集未完成，已完成集数保留。')
+        try:meta=probe(target)
+        except (ValueError,RuntimeError) as e:
+            raise RuntimeError('AI输出视频无法读取：'+v['name']+'。请查看任务日志中的引擎错误；本集未完成，可修复环境后重试。') from e
+        if abs(meta['duration']-v['duration'])>.3:raise RuntimeError('AI输出未覆盖完整视频：'+v['name']+f'，原片 {v["duration"]:.2f} 秒，输出 {meta["duration"]:.2f} 秒。已保留现场，请重试当前视频。')
+        if v.get('audio') and not meta['audio']:
+            stage(job,'恢复原片音轨：'+v['name'],10+i/len(videos)*80)
+            restored=target.with_name(target.stem+'-audio.mp4')
+            ff(['-i',str(target),'-i',v['path'],'-map','0:v:0','-map','1:a:0','-c:v','copy','-c:a','aac','-b:a','192k','-movflags','+faststart',str(restored)],job)
+            audio_meta=probe(restored)
+            if not audio_meta['audio'] or abs(audio_meta['duration']-v['duration'])>.3:
+                raise RuntimeError('AI输出音轨恢复失败，本集未登记完成，请查看日志后重试')
+            restored.replace(target)
         register(p,target,'AI字幕处理',job);checkpoint(job,key,[target]);outputs.append(target)
         telemetry.finish(JOBS[job],tid)
         with LOCK:JOBS[job]['telemetry']['batch']['done']+=1
@@ -1611,8 +1622,10 @@ def create_job(body):
             if len(paths)!=len(set(paths)):raise ValueError('制作集数重复')
             fixed[pid]=list(paths)
         options['sourceVideoPaths']=fixed
-        if kind=='subtitle' and requested is not None:options['subtitleAllSelected']=True
-        if requested is not None or kind=='pipeline':
+        # New standalone tasks cover every selected file in full. Persist this
+        # option in the job so historical first-N tasks retain their own scope.
+        if kind=='subtitle':options['subtitleAllSelected']=True
+        if requested is not None or kind in ('pipeline','subtitle'):
             preflight=job_preflight(body|{'sourceVideoPaths':fixed})
             if not preflight['ok']:raise ValueError('；'.join(preflight['errors']))
     elif 'sourceVideoPaths' in body:raise ValueError('此制作类型不支持指定源视频集数')
