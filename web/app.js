@@ -14,7 +14,29 @@ const activeProject=()=>state.projects.find(p=>p.id===focusId)||state.projects[0
 async function api(path,body,options={}){const r=await fetch('/api/'+path,{...(body===undefined?{cache:'no-store'}:{method:'POST',headers:{'Content-Type':'application/json','X-Local-Client':'1'},body:JSON.stringify(body)}),signal:options.signal});const result=await r.json();if(!r.ok)throw new Error(result.error||'请求失败');return result;}
 function toast(text,error=false){const el=$('#toast');clearTimeout(toastTimer);el.textContent=text;el.className='toast'+(error?' error':'');el.hidden=false;toastTimer=setTimeout(()=>el.hidden=true,error?8000:4300);}
 async function refresh(render=false){state=await api('state');selected=new Set([...selected].filter(id=>state.projects.some(p=>p.id===id)));if(!focusId&&state.projects.length)focusId=state.projects[0].id;if(render)renderPage();renderActivity();renderTaskbar();renderNav();renderEncoderPill();}
-function renderNav(){const sig=current+':'+state.projects.length;if(sig===navSignature)return;navSignature=sig;$('#nav').innerHTML=pages.map(([id,name,ico,group])=>(group?`<div class="nav-group-title">${group}</div>`:'')+`<a class="nav-link ${current===id?'active':''}" href="#${id}" ${current===id?'aria-current="page"':''}>${icon(ico)}<span>${name}</span>${id==='scan'&&state.projects.length?`<span class="nav-count">${state.projects.length}</span>`:''}</a>`).join('');}
+// Route registration remains independent of sidebar categories so feature modules
+// can add pages without inheriting a neighboring page's group by accident.
+const navigationSections=[
+ ['素材获取',['sources','scan']],
+ ['视频处理',['preprocess','subtitle','transform','highlight','tracks']],
+ ['素材制作',['text','cost']],
+ ['推广发布',['promotion','publish']],
+ ['任务与系统',['progress','logs','parallel','api','license']]
+];
+const navigationLabels={scan:'本地素材',text:'文案与封面',tracks:'分轨与剪映工程'};
+function renderNav(){
+ const signature=JSON.stringify([current,state.projects.length,pages.map(p=>p.slice(0,3))]);
+ if(signature===navSignature)return;navSignature=signature;
+ const nav=$('#nav'),scroll=nav.scrollTop,focused=document.activeElement?.closest('#nav a')?.getAttribute('href');
+ const registered=new Map(pages.map(p=>[p[0],p])),seen=new Set();
+ const sections=navigationSections.map(([name,ids])=>[name,ids.map(id=>registered.get(id)).filter(Boolean)]);
+ const known=new Set(navigationSections.flatMap(([,ids])=>ids)),extra=pages.filter(p=>!known.has(p[0]));
+ if(extra.length)sections.push(['其他工具',extra]);
+ nav.innerHTML=sections.filter(([,items])=>items.length).map(([name,items],index)=>`<div class="nav-section" role="group" aria-labelledby="nav-section-${index}"><div class="nav-group-title" id="nav-section-${index}">${esc(name)}</div>${items.filter(([id])=>{if(seen.has(id))return false;seen.add(id);return true;}).map(([id,title,ico])=>`<a class="nav-link ${current===id?'active':''}" href="#${esc(id)}" ${current===id?'aria-current="page"':''}>${icon(ico)}<span>${esc(navigationLabels[id]||title)}</span>${id==='scan'&&state.projects.length?`<span class="nav-count">${state.projects.length}</span>`:''}</a>`).join('')}</div>`).join('');
+ nav.scrollTop=scroll;
+ if(focused)$$('a',nav).find(a=>a.getAttribute('href')===focused)?.focus({preventScroll:true});
+}
+
 function intro(title,desc,action=''){return `<div class="page-intro"><div><div class="page-index"><span></span>制作工作空间</div><h1>${title}</h1><p class="subtitle">${desc}</p></div>${action}</div>`;}
 function card(title,ico,body,sub='',tag=''){return `<section class="card"><div class="card-head"><div><h2>${icon(ico)}${title}</h2>${sub?`<p>${sub}</p>`:''}</div>${tag}</div><div class="card-body">${body}</div></section>`;}
 function field(label,key,o={}){const val=state.config[key],extra=o.min!==undefined?`min="${o.min}" max="${o.max}" step="${o.step??1}"`:'';let input=o.options?`<select data-config="${key}" id="config-${key}">${o.options.map(([v,t])=>`<option value="${esc(v)}" ${String(val)===String(v)?'selected':''}>${t}</option>`).join('')}</select>`:o.textarea?`<textarea data-config="${key}" id="config-${key}" rows="${o.rows||4}">${esc(val)}</textarea>`:`<input data-config="${key}" id="config-${key}" type="${o.type||'text'}" value="${esc(val)}" ${extra} placeholder="${esc(o.placeholder||'')}">`;if(o.browse)input=`<div class="path-input">${input}<button class="button" data-action="browse" data-key="${key}" ${key==='costTemplate'?'data-mode="template"':['vsrPython','sauPython'].includes(key)?'data-mode="python"':''}>${icon('folder')}浏览</button></div>`;return `<div class="field"><label for="config-${key}">${label}</label>${input}${o.hint?`<p class="field-hint">${o.hint}</p>`:''}</div>`;}
