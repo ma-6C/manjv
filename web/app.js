@@ -155,7 +155,7 @@ document.addEventListener('click',async e=>{
 });
 document.addEventListener('change',async e=>{const el=e.target;try{
  if(el.dataset.config==='textProvider'||el.dataset.config==='imageProvider'){await switchAIProvider(el.dataset.config==='textProvider'?'text':'image',el.value);return;}
- if(el.dataset.config){const value=el.type==='checkbox'?el.checked:el.type==='number'?Number(el.value):el.value;await updateConfig({[el.dataset.config]:value},['subtitleMode','regroup','segmentSeconds'].includes(el.dataset.config));if(['apiBase','textProtocol','imageApiBase','imageProtocol'].includes(el.dataset.config))await refresh(true);}
+ if(el.dataset.config){const value=el.type==='checkbox'?el.checked:el.type==='number'?Number(el.value):el.value;await updateConfig({[el.dataset.config]:value,...(el.dataset.config==='vsrMode'?{subtitleMode:'vsr'}:{})},['subtitleMode','vsrMode','regroup','segmentSeconds'].includes(el.dataset.config));if(['apiBase','textProtocol','imageApiBase','imageProtocol'].includes(el.dataset.config))await refresh(true);}
  if(el.dataset.region)await changeRegionNumber(el.dataset.region,Number(el.value));
  if(el.dataset.select){el.checked?selected.add(el.dataset.select):selected.delete(el.dataset.select);el.closest('tr').classList.toggle('selected',el.checked);renderTaskbar();}
  if(el.id==='select-all'){state.projects.filter(p=>p.name.includes(libraryQuery)||p.originalName.includes(libraryQuery)).forEach(p=>el.checked?selected.add(p.id):selected.delete(p.id));$('#library').innerHTML=projectRows();renderTaskbar();}

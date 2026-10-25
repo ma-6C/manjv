@@ -44,6 +44,7 @@ import track_sheets
 import vsr_pool
 import jianying_projects
 import highlight_render
+import lama_local
 DATA = runtime_paths.data_home()
 DATA.mkdir(parents=True, exist_ok=True)
 PUBLIC = ROOT / 'web'
@@ -87,7 +88,7 @@ DEFAULT = {
     'endingText': '', 'costTemplate': '', 'costRows': [
         {'name': '演员报酬', 'amount': 0}, {'name': '制作与剪辑', 'amount': 0},
         {'name': 'AI服务', 'amount': 0}, {'name': '音乐与素材授权', 'amount': 0}, {'name': '其他', 'amount': 0}],
-    'vsrRoot': '', 'vsrPython': '' if getattr(sys,'frozen',False) else sys.executable, 'vsrMode': 'sttn-auto', 'vsrReuseWorker':True,
+    'vsrRoot': '', 'vsrPython': '' if getattr(sys,'frozen',False) else sys.executable, 'vsrMode': 'sttn-auto', 'vsrReuseWorker':True, 'lamaDevice':'auto',
     'sauRoot': str(ROOT/'engines'/'social-auto-upload'), 'sauPython': sys.executable,
     'uploadMode': 'draft', 'uploadSchedule': '',
 }
@@ -98,19 +99,22 @@ def read_json(path, fallback):
     except (OSError, ValueError):
         return copy.deepcopy(fallback)
 
-STATE = read_json(DATA / 'state.json', {'config': DEFAULT, 'projects': [], 'accounts': [], 'logs': []})
+STATE = read_json(DATA / 'state.json', {'config': {}, 'projects': [], 'accounts': [], 'logs': []})
+saved_vsr_mode=STATE.get('config',{}).get('vsrMode')
 if 'highlightFixed' not in STATE.get('config',{}):STATE.setdefault('config',{})['highlightFixed']=STATE.get('config',{}).get('highlightMin',DEFAULT['highlightFixed'])
 STATE['config'] = DEFAULT | STATE.get('config', {})
 connections.retire_video_config(STATE['config'])
 # 同一台电脑上的独立 AI 引擎可供各版本共用，模型和密钥不打入桌面包。
 portable_engine=engine_manager.active(DATA)
 if portable_engine:
-    STATE['config'].update(vsrRoot=portable_engine['root'],vsrPython=portable_engine['python'],vsrMode=portable_engine['verifiedMode'],subtitleMode='vsr')
+    STATE['config'].update(vsrRoot=portable_engine['root'],vsrPython=portable_engine['python'],subtitleMode='vsr')
+    if not saved_vsr_mode:STATE['config']['vsrMode']=portable_engine.get('verifiedMode','sttn-auto')
 if not STATE['config']['vsrRoot'] and not getattr(sys,'frozen',False):
     for home in [APP_HOME, *list(APP_HOME.parents)[:3]]:
         install = read_json(home / 'engines' / 'vsr-install.json', {})
         if install.get('root') and install.get('python') and Path(install['root']).is_dir() and Path(install['python']).is_file():
-            STATE['config'].update(vsrRoot=install['root'], vsrPython=install['python'], vsrMode=install.get('verifiedMode','sttn-auto'), subtitleMode='vsr')
+            STATE['config'].update(vsrRoot=install['root'], vsrPython=install['python'], subtitleMode='vsr')
+            if not saved_vsr_mode:STATE['config']['vsrMode']=install.get('verifiedMode','sttn-auto')
             break
 for key in ['projects', 'accounts', 'logs','promotionTasks','promotionRevenue']:
     STATE.setdefault(key, [])
@@ -191,6 +195,8 @@ def validate_config(c):
     for key,value in DEFAULT.items():
         if isinstance(value,bool) and not isinstance(c[key],bool):raise ValueError(f'{key}必须为布尔值')
     if c['subtitleMode'] not in ['local','cloud','vsr']:raise ValueError('字幕模式无效')
+    if c['vsrMode'] not in ['sttn-auto','lama-box','sttn','sttn-det','lama','propainter']:raise ValueError('本地修复引擎无效')
+    if c['lamaDevice'] not in ['auto','cpu']:raise ValueError('LaMa 推理设备无效')
     if c['uploadMode'] not in ['draft','now','scheduled']:raise ValueError('上传模式无效')
     for key, lo, hi in [('segmentSeconds', 1, 3600), ('width', 64, 3840), ('height', 64, 3840),
                         ('parallel', 1, 8), ('brightness', -.2, .2), ('contrast', .8, 1.3),
@@ -1023,8 +1029,10 @@ def vsr_subtitle(p,cfg,job):
     if not (root/'backend'/'main.py').is_file():
         raise ValueError('请先配置 video-subtitle-remover 源码目录，需包含 backend/main.py、模型权重和依赖环境')
     if not runtime.is_file():raise ValueError('字幕引擎Python不存在，请选择已安装该引擎依赖的Python解释器')
-    if cfg['vsrMode'] not in ['sttn-auto','sttn','sttn-det','lama','propainter']:
+    if cfg['vsrMode'] not in ['sttn-auto','lama-box','sttn','sttn-det','lama','propainter']:
         raise ValueError('不支持的字幕修补模型')
+    if cfg['vsrMode']=='lama-box' and not lama_local.ready(root,runtime):raise ValueError('LaMa 模型未安装：需要 backend/models/big-lama/big-lama.pt')
+    (vsr_pool.POOL if cfg['vsrMode']=='lama-box' else lama_local.POOL).close()
     out=project_dir(p,cfg)/'本地AI去字幕'/job;out.mkdir(parents=True,exist_ok=True)
     videos=p['videos'][:cfg['subtitleFirst']]
     telemetry.batch(JOBS[job],p['id']+':subtitle','本阶段已修复的源视频',len(videos),sum(cached(job,f'{p["id"]}:subtitle:{i}') is not None for i in range(len(videos))))
@@ -1042,15 +1050,19 @@ def vsr_subtitle(p,cfg,job):
         args+=['--inpaint-mode','sttn-det' if cfg['vsrMode']=='sttn' else cfg['vsrMode']]
         stage(job,f'本地AI去字幕：{i+1}/{len(videos)}，模型 {cfg["vsrMode"]}',10+i/len(videos)*80)
         tid=telemetry.begin(JOBS[job],'加载模型／准备字幕修复',v['name'],unit='frames')
-        if cfg.get('vsrReuseWorker',True) and cfg['vsrMode']=='sttn-auto':
+        if cfg['vsrMode']=='lama-box' or cfg.get('vsrReuseWorker',True) and cfg['vsrMode']=='sttn-auto':
             coords=[[int(r['y']*h),int((r['y']+r['h'])*h),int(r['x']*w),int((r['x']+r['w'])*w)] for r in subtitle_regions(cfg)]
             def attach(proc):
                 with LOCK:JOBS[job]['processes'].add(proc)
             def detach(proc):
                 with LOCK:JOBS[job]['processes'].discard(proc)
-            stats=vsr_pool.POOL.run(runtime,root,{'input':v['path'],'output':str(target),'mode':cfg['vsrMode'],'regions':coords,'duration':v['duration']},JOBS[job]['cancel'],
+            pool=lama_local.POOL if cfg['vsrMode']=='lama-box' else vsr_pool.POOL
+            stats=pool.run(runtime,root,{'input':v['path'],'output':str(target),'mode':cfg['vsrMode'],'regions':coords,'duration':v['duration'],'device':cfg.get('lamaDevice','auto'),'ffmpeg':FFMPEG},JOBS[job]['cancel'],
                 observe=lambda line:telemetry.vsr_event(JOBS[job],tid,line),heartbeat=lambda:telemetry.heartbeat(JOBS[job],tid),attach=attach,detach=detach)
+            if not cfg.get('vsrReuseWorker',True):pool.close()
             JOBS[job]['vsrWorker']=stats
+            JOBS[job]['localRepairEngine']=cfg['vsrMode']
+            if stats.get('fallback'):log('LaMa 推理已自动改用 CPU：'+stats['fallback'],level='warning',job=job)
             log(('复用常驻模型' if stats['reusedProcess'] else '启动常驻模型')+f'，累计处理 {stats["completedVideos"]} 集，模型加载 {stats["modelLoads"]} 次',job=job)
         else:
             vsr_pool.POOL.close()
@@ -1088,7 +1100,7 @@ def preview_subtitle(p,cfg,job):
     result=repair_subtitles(sample,cfg,job,True)[0]
     JOBS[job]['result']={'before':str(source),'after':str(result),'videoIndex':options['videoIndex'],
                         'start':options['start'],'seconds':probe(source)['duration'],
-                        'mode':cfg['subtitleMode'],'regions':subtitle_regions(cfg)}
+                        'mode':cfg['subtitleMode'],'engine':cfg['vsrMode'] if cfg['subtitleMode']=='vsr' else cfg['subtitleMode'],'regions':subtitle_regions(cfg)}
     persist_jobs()
 
 def sha256(path):
@@ -1537,6 +1549,7 @@ def shutdown_jobs():
                     except OSError:pass
         persist_jobs()
     vsr_pool.POOL.close()
+    lama_local.POOL.close()
 
 def hook_inputs(p,kind):
     if kind=='original':return p['videos']
@@ -1564,6 +1577,7 @@ def job_preflight(body):
         if not Path(v['path']).is_file():errors.append('源视频已移动或删除：'+v['name'])
     if uses_subtitle and cfg['subtitleMode']=='vsr':
         if not (Path(cfg['vsrRoot'])/'backend/main.py').is_file() or not Path(cfg['vsrPython']).is_file():errors.append('本地AI去字幕引擎未配置或不完整，请到AI去字幕页核对')
+        if cfg['vsrMode']=='lama-box' and not lama_local.ready(cfg['vsrRoot'],cfg['vsrPython']):errors.append('LaMa 本地模型未安装：需要 big-lama/big-lama.pt，可先切回 STTN')
     interfaces=[];channels=[]
     if uses_subtitle and cfg['subtitleMode']=='cloud':channels.append('subtitle')
     if kind=='pipeline' and cfg['autoText']:channels.append('text')

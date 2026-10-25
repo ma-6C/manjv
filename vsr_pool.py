@@ -54,9 +54,9 @@ for line in sys.stdin:
 class WorkerError(RuntimeError):pass
 
 class Client:
-    def __init__(self,runtime,root):
+    def __init__(self,runtime,root,worker_source=None):
         self.messages=queue.Queue();self.observe=None;self.tail='';self.closed=False
-        self.process=subprocess.Popen([str(runtime),'-u','-c',WORKER_SOURCE,str(root)],cwd=root,
+        self.process=subprocess.Popen([str(runtime),'-u','-c',worker_source if worker_source is not None else WORKER_SOURCE,str(root)],cwd=root,
             stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE,
             env=os.environ|{'PYTHONIOENCODING':'utf-8','PYTHONUNBUFFERED':'1'},creationflags=getattr(subprocess,'CREATE_NO_WINDOW',0))
         def protocol():
@@ -100,10 +100,11 @@ class Client:
             except (OSError,ValueError):pass
 
 class Pool:
-    def __init__(self,idle_seconds=120):self.lock=threading.RLock();self.client=None;self.signature=None;self.timer=None;self.idle_seconds=idle_seconds
-    @staticmethod
-    def fingerprint(runtime,root):
-        paths=[Path(runtime),Path(root)/'backend/main.py',Path(root)/'config/config.json',Path(root)/'backend/models/sttn-auto/infer_model.pth']
+    def __init__(self,idle_seconds=120,worker_source=None,model_file='backend/models/sttn-auto/infer_model.pth'):self.lock=threading.RLock();self.client=None;self.signature=None;self.timer=None;self.idle_seconds=idle_seconds;self.worker_source=worker_source;self.model_file=model_file
+    def fingerprint(self,runtime,root):
+        # Watch only this worker's model. The upstream VSR initializer can merge
+        # other model shards; those writes must not restart an unrelated worker.
+        paths=[Path(runtime),Path(root)/'backend/main.py',Path(root)/'config/config.json',Path(root)/self.model_file]
         return tuple((str(p.resolve()),p.stat().st_size,p.stat().st_mtime_ns) for p in paths if p.is_file())
     def close(self):
         with self.lock:
@@ -114,7 +115,7 @@ class Pool:
         with self.lock:
             if self.timer:self.timer.cancel();self.timer=None
             signature=self.fingerprint(runtime,root);cold=not self.client or self.signature!=signature or self.client.process.poll() is not None
-            if cold:self.close();self.client=Client(runtime,root);self.signature=signature
+            if cold:self.close();self.client=Client(runtime,root,self.worker_source);self.signature=signature
             client=self.client;client.observe=observe;attach(client.process)
             try:
                 if cold:
