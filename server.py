@@ -45,6 +45,7 @@ import vsr_pool
 import jianying_projects
 import highlight_render
 import lama_local
+import publish_workflow
 DATA = runtime_paths.data_home()
 DATA.mkdir(parents=True, exist_ok=True)
 PUBLIC = ROOT / 'web'
@@ -54,6 +55,7 @@ QUEUE_THREAD = None
 QUEUE_WAKE = threading.Event()
 QUEUE_STOP = threading.Event()
 SOURCE_MANAGER = None
+PUBLISH_WORKSPACE = None
 LOCAL_JOB_KINDS = {'pipeline','transcode','subtitle','preview','playback','rewrite','cover','coverAI','records','cost','highlight','package','hook','promotion_package','track_sheet','jianying_project'}
 SECRETS = {'apiKey': '', 'subtitleKey': ''}
 FFMPEG = os.environ.get('FFMPEG_EXE') or shutil.which('ffmpeg')
@@ -1550,6 +1552,7 @@ def shutdown_jobs():
         persist_jobs()
     vsr_pool.POOL.close()
     lama_local.POOL.close()
+    if PUBLISH_WORKSPACE is not None:PUBLISH_WORKSPACE.shutdown()
 
 def hook_inputs(p,kind):
     if kind=='original':return p['videos']
@@ -1763,6 +1766,29 @@ def public_state():
         result['promotionEntryTypes']=promotions.TYPES
         return result
 
+
+def publish_workspace():
+    global PUBLISH_WORKSPACE
+    with LOCK:
+        if PUBLISH_WORKSPACE is None:
+            def snapshot(pid):
+                with LOCK:
+                    project=copy.deepcopy(get_project(pid));config=copy.deepcopy(STATE['config'])
+                    # Only the latest explicitly registered finished cut is eligible.
+                    # Source videos and 5/10-second previews are never substituted.
+                    if project.get('finalVideoPaths'):
+                        entries={a['path']:a for a in project['artifacts']}
+                        project['publishVideos']=[copy.deepcopy(entries.get(path,{'path':path})) for path in project['finalVideoPaths']]
+                    else:
+                        entries=[a for a in project['artifacts'] if a['kind']=='视频']
+                        # Select the latest generation before checking existence.
+                        # A missing latest output must not fall back to an older cut.
+                        project['publishVideos']=copy.deepcopy([a for a in entries if a.get('job')==entries[-1].get('job')]) if entries else []
+                    project['path']=project.get('publishFolder') or project.get('source','')
+                    return project,config
+            PUBLISH_WORKSPACE=publish_workflow.Workspace(STATE,DATA,LOCK,save,snapshot,probe)
+        return PUBLISH_WORKSPACE
+
 def allowed_file(path):
     path=Path(path).resolve()
     # 不允许借由素材文件服务读取脚本、配置或密钥；仅暴露明确注册的素材和生成文件。
@@ -1828,6 +1854,12 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_header('Set-Cookie','manju_session='+session.cookie+'; HttpOnly; SameSite=Strict; Path=/')
                 self.send_header('Content-Length','0');self.end_headers();return
             self.session_check()
+            if url.path=='/api/publish/workspace':
+                licensing.require(DATA)
+                return self.reply(value=publish_workspace().public())
+            if url.path=='/api/publish/file':
+                licensing.require(DATA)
+                return self.file(publish_workspace().file(q.get('projectId',[''])[0],q.get('path',[''])[0]),q.get('download',['0'])[0]=='1')
             if url.path=='/api/license':return self.reply(value=licensing.status(DATA))
             if url.path=='/api/component':return self.reply(value={'progress':engine_manager.progress(),'active':engine_manager.active(DATA)})
             if not licensing.status(DATA)['valid']:
@@ -1881,6 +1913,14 @@ class Handler(BaseHTTPRequestHandler):
             if not isinstance(body,dict):raise ValueError('请求必须为对象')
             if path=='/api/license/activate':return self.reply(value=licensing.activate(DATA,body.get('token','')))
             licensing.require(DATA)
+            if path=='/api/publish/inspect':return self.reply(value=publish_workspace().inspect(body.get('projectId',''),body.get('overrides')))
+            if path=='/api/publish/settings':return self.reply(value=publish_workspace().settings(body.get('projectId',''),body.get('overrides',{})))
+            if path=='/api/publish/discover':return self.reply(value=publish_workspace().discover(body.get('folder','')))
+            if path=='/api/publish/import':return self.reply(value=publish_workspace().import_folders(body.get('folders',[])))
+            if path=='/api/publish/export':return self.reply(value=publish_workspace().export(body.get('projectId','')))
+            if path=='/api/publish/browser':return self.reply(value=publish_workspace().browser(body.get('accountId',''),body.get('action',''),body.get('projectId','')))
+            if path=='/api/publish/record':return self.reply(value=publish_workspace().record(body))
+            if path=='/api/publish/open':return self.reply(value=publish_workspace().open(body.get('projectId',''),body.get('taskId',''),body.get('key','')))
             if path=='/api/tracks/import':return self.reply(value=import_track_files(body.get('paths')))
             if path=='/api/jianying/status':return self.reply(value=jianying_projects.status(body.get('jianying',STATE.get('jianyingOptions',{}))))
             if path=='/api/jianying/plan':
@@ -2104,6 +2144,12 @@ class Handler(BaseHTTPRequestHandler):
                 return self.reply(value={'removed':True})
             if path=='/api/browse':
                 mode=body.get('mode','folder')
+                if mode in ('images','documents'):
+                    file_filter='Images|*.jpg;*.jpeg;*.png;*.webp' if mode=='images' else 'Reports|*.pdf;*.docx;*.csv;*.jpg;*.jpeg;*.png;*.webp'
+                    script="Add-Type -AssemblyName System.Windows.Forms; $d=New-Object System.Windows.Forms.OpenFileDialog; $d.Filter='"+file_filter+"'; $d.Multiselect=$true; [Console]::OutputEncoding=[System.Text.Encoding]::UTF8; if($d.ShowDialog() -eq 'OK'){ ConvertTo-Json -Compress -InputObject @($d.FileNames) } else { Write-Output '[]' }"
+                    proc=subprocess.run(['powershell','-NoProfile','-STA','-Command',script],capture_output=True,timeout=180,creationflags=getattr(subprocess,'CREATE_NO_WINDOW',0))
+                    if proc.returncode:raise ValueError('附件选择窗口未能打开')
+                    return self.reply(value={'paths':json.loads(proc.stdout.decode('utf-8-sig','replace').strip() or '[]')})
                 if mode=='videos':
                     script="Add-Type -AssemblyName System.Windows.Forms; $d=New-Object System.Windows.Forms.OpenFileDialog; $d.Filter='Video files|*.mp4;*.mov;*.mkv;*.avi;*.m4v;*.webm;*.ts'; $d.Multiselect="+('$false' if body.get('multiple') is False else '$true')+"; [Console]::OutputEncoding=[System.Text.Encoding]::UTF8; if($d.ShowDialog() -eq 'OK'){ ConvertTo-Json -Compress -InputObject @($d.FileNames) } else { Write-Output '[]' }"
                     proc=subprocess.run(['powershell','-NoProfile','-STA','-Command',script],capture_output=True,timeout=180,creationflags=getattr(subprocess,'CREATE_NO_WINDOW',0))
