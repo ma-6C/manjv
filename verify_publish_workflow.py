@@ -71,6 +71,9 @@ try:
     overrides={'producer':'本地验收制作方','trialEpisodes':1,'episodeCount':1,'totalCostYuan':100,
         'rightsConfirmed':True,'coverPath':images[0],'proofImages':[images[1]],'storyboardImages':images[2:6],
         'costImages':[images[0]],'costReportPaths':[str(csv)],'copyrightImages':[]}
+    project['artifacts'].append({'kind':'剪映工程截图','path':images[1],
+        'officialEvidence':{'source':'window_capture','platform':'jianying','appVerified':True,
+            'sha256':s.sha256(images[1]),'projectConfirmedByUser':True,'fixture':True}})
     svc.settings(pid,overrides);ready=svc.inspect(pid)
     check('真实成片与全部本地资料齐全可继续',ready['ready'] and ready['fields']['episodeCount']==1)
     check('检查结果与附件元信息持久化',json.loads((s.DATA/'state.json').read_text('utf-8'))['publishWorkspace']['plans'][pid]['fingerprint']==ready['fingerprint'])

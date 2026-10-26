@@ -1,4 +1,8 @@
-"""Real filesystem acceptance for local submission packages (no network)."""
+"""Real filesystem/provenance-policy acceptance (no official-app acceptance).
+
+Image and registration metadata below are controlled test fixtures. They prove
+the policy gates, not that a real official editor was opened or captured.
+"""
 from pathlib import Path
 import base64
 import copy
@@ -55,6 +59,20 @@ def main():
     story = [write(drama / 'fenjing' / f'源帧_{i}.png', png) for i in range(4)]
     cost_image = write(drama / 'zhengming' / '实际成本比例.png', png)
     report = write(drama / '成本报告.csv', '项目,金额\n制作,15000\n'.encode('utf-8-sig'))
+    captured = write(drama / '截图登记fixture' / '受控窗口截图.png', png)
+    def capture_artifact(path, kind='剪映工程截图', platform='jianying'):
+        return {'kind': kind, 'path': path, 'officialEvidence': {
+            'source': 'window_capture', 'platform': platform, 'appVerified': True,
+            'sha256': m.digest(path), 'projectConfirmedByUser': True}}
+    registered = {'id': 'registered_fixture', 'name': '受控登记测试剧', 'source': str(drama),
+                  'intro': '本段仅验证本地来源登记机制，不是官方应用实测。', 'rights': True,
+                  'publishVideos': [v2, v10], 'cover': cover,
+                  'artifacts': [capture_artifact(captured)] +
+                    [{'kind': '源帧', 'path': p} for p in story] +
+                    [{'kind': '成本报告图片', 'path': cost_image}, {'kind': '成本报告', 'path': report}]}
+    registered_options = {'producer': '测试工作室', 'totalCostYuan': 15000, 'rightsConfirmed': True}
+    def registered_plan():
+        return m.inspect(registered, {}, registered_options)
     # Known material subdirectories must not become separate drama entries.
     write(drama / '工程记录' / '误放样片.mp4', b'ignored nested video')
     rows = m.discover(base / '总资料')
@@ -67,7 +85,9 @@ def main():
     write(drama / '已经发布成功.txt', b'old marker')
     marked = m.inspect_folder(drama, overrides={'rightsConfirmed': True})
     check('旧成功标记不被当作平台成功且不跳过', not marked['platformSubmitted'] and any('历史成功标记' in s for s in marked['warnings']))
-    check('完整资料经本人授权后本地检测通过', marked['ready'])
+    check('历史文件夹图片即使确认授权也不冒认为官方截图', not marked['ready'] and not marked['files']['proofImages'])
+    marked = registered_plan()
+    check('受控完整登记元数据及哈希匹配后通过来源机制检查', marked['ready'] and marked['files']['proofImages'][0]['officialEvidence']['sha256'] == m.digest(captured))
     internal = {'id': 'internal', 'name': '内部项目', 'intro': '实际简介', 'rights': True,
                 'videos': [{'path': v2}], 'publishVideos': [], 'cover': cover,
                 'artifacts': [{'kind': '分轨工程图', 'path': proof}]}
@@ -77,6 +97,29 @@ def main():
     check('原始源视频不会冒充正片成品', not internal_plan['files']['videos'] and not internal_plan['ready'])
     implicit = m.inspect({k: v for k, v in internal.items() if k != 'publishVideos'}, {}, {})
     check('分轨仿真图不会自动当剪映工程证明', not implicit['files']['proofImages'])
+    check('旧override选中的自绘图片被列为未登记缺项', not internal_plan['files']['proofImages'] and any('未登记为已核验官方窗口截图' in x for x in internal_plan['errors']))
+    old_record = copy.deepcopy(registered)
+    old_record['artifacts'] = [{'kind': '工程记录', 'path': proof}]
+    check('PIL拼接工程记录不会自动当官方窗口截图', not m.inspect(old_record, {}, registered_options)['files']['proofImages'])
+    missing_meta = copy.deepcopy(registered)
+    missing_meta['artifacts'] = [{'kind': '剪映工程截图', 'path': captured}]
+    check('旧剪映截图名称没有来源元数据仍缺官方证据', not m.inspect(missing_meta, {}, registered_options)['files']['proofImages'])
+    imported_image = copy.deepcopy(registered)
+    imported_image['artifacts'] = [{'kind': '待核对工程截图', 'path': captured, 'officialEvidence': capture_artifact(captured)['officialEvidence']}]
+    check('手动导入类别不能因外带元数据自动升级', not m.inspect(imported_image, {}, registered_options)['files']['proofImages'])
+    renamed = write(drama / '改名为官方工程截图.png', png)
+    check('同字节图片复制改名不继承原路径的登记', not m.inspect(registered, {}, registered_options | {'proofImages': [renamed]})['files']['proofImages'])
+    for field, value in [('source', 'manual_import'), ('appVerified', False), ('projectConfirmedByUser', False), ('platform', 'jimeng'), ('sha256', '0' * 64)]:
+        invalid = copy.deepcopy(registered)
+        invalid['artifacts'][0]['officialEvidence'][field] = value
+        check('官方来源登记拒绝不完整或不一致字段_' + field, not m.inspect(invalid, {}, registered_options)['files']['proofImages'])
+    dream = copy.deepcopy(registered)
+    dream['artifacts'][0] = capture_artifact(captured, '即梦工程截图', 'jimeng')
+    check('即梦受控完整来源登记也可通过机制检查', len(m.inspect(dream, {}, registered_options)['files']['proofImages']) == 1)
+    mutated = write(drama / '像素变化截图.png', png + b'changed-by-fixture')
+    altered = copy.deepcopy(registered)
+    altered['artifacts'][0]['path'] = mutated
+    check('有效图片字节发生变化但沿用旧哈希被拒绝', not m.inspect(altered, {}, registered_options)['files']['proofImages'])
     missing = m.inspect_folder(drama, overrides={'rightsConfirmed': True, 'coverPath': str(drama / '不存在.png')})
     check('指定缺失附件导致失败，不静默回退另一封面', not missing['ready'] and missing['files']['cover'] is None)
     empty = write(drama / 'empty.png', b'')
@@ -109,7 +152,7 @@ def main():
     before_calls = len(probe_calls)
     preknown = m.inspect(stamped, {}, opts, probe=probe)
     check('带相同stat的可信媒体元信息直接复用', len(probe_calls) == before_calls and preknown['files']['videos'][0]['duration'] == 3)
-    marked = m.inspect_folder(drama, overrides={'rightsConfirmed': True})
+    marked = registered_plan()
     source_files = [Path(f['path']) for group in marked['files'].values() for f in ([group] if isinstance(group, dict) else group or [])]
     original_hashes = {str(p): m.digest(p) for p in source_files}
     destination = base / '独立导出'
@@ -119,10 +162,13 @@ def main():
     check('实际复制包文件哈希逐一一致', all(m.digest(Path(exported['directory']) / f['name']) == f['sha256'] for f in manifest['files']))
     check('导出未改源文件', all(m.digest(p) == h for p, h in original_hashes.items()))
     check('导出不创建成功标记或平台通过声明', not (Path(exported['directory']) / '已经发布成功.txt').exists() and not manifest['platformSubmitted'] and not manifest['platformApproved'])
+    proof_entry = next(x for x in manifest['files'] if x['group'] == 'proofImages')
+    check('导出携带截图来源但明确要求本机重新核验', proof_entry['officialEvidence']['source'] == 'window_capture' and proof_entry['provenanceTrust'] == 'revalidate-against-local-registry-on-import')
     another = m.export_packet(marked, destination)
     check('重复导出创建独立目录不覆盖', another['directory'] != exported['directory'] and Path(exported['manifest']).is_file())
     reimported = m.inspect_folder(exported['directory'], overrides={'rightsConfirmed': True})
-    check('本软件资料包可按相对清单重新识别完整附件', reimported['ready'] and len(reimported['files']['proofImages']) == 1)
+    check('资料包可以识别媒体但不会继承清单中的官方来源信任', not reimported['ready'] and not reimported['files']['proofImages'] and len(reimported['files']['videos']) == 2)
+    check('packet外带官方元数据仍要求回工程页采集', any('未登记为已核验官方窗口截图' in x for x in reimported['errors']) and any('不会继承为本机已核验记录' in x for x in reimported['warnings']))
     corrupted = json.loads(Path(another['manifest']).read_text('utf-8'))
     corrupted['files'][0]['name'] = '../越界.mp4'
     Path(another['manifest']).write_text(json.dumps(corrupted), 'utf-8')
@@ -131,10 +177,10 @@ def main():
     tampered = copy.deepcopy(marked)
     tampered['fields']['title'] = '被修改'
     check('检测快照发生修改必须重新检查', rejected(lambda: m.export_packet(tampered, destination)))
-    Path(proof).write_bytes(png + b'changed')
+    Path(captured).write_bytes(png + b'changed')
     check('检测后附件变化被拒绝且清理未完成包', rejected(lambda: m.export_packet(marked, destination)) and len(list(destination.iterdir())) == 2)
-    Path(proof).write_bytes(png)
-    current = m.inspect_folder(drama, overrides={'rightsConfirmed': True})
+    Path(captured).write_bytes(png)
+    current = registered_plan()
     with patch.object(m.shutil, 'disk_usage', return_value=m.shutil.disk_usage(destination)._replace(free=1)):
         check('空间不足在复制前报错', rejected(lambda: m.export_packet(current, destination)))
     cancelled = [False]
@@ -149,7 +195,7 @@ def main():
         interrupted = True
     check('导出提供真实字节进度并支持取消及清理', interrupted and ticks and ticks[0][0] > 0 and len(list(destination.iterdir())) == 2)
     output = {'passed': len(checks), 'checks': checks, 'base': str(base),
-              'scope': 'filesystem-and-policy; fixture videos intentionally not media-decoded',
+              'scope': 'filesystem-and-provenance-policy; controlled image metadata fixtures, no official editor acceptance; fixture videos intentionally not media-decoded',
               'packet': exported['directory'], 'platformSubmitted': False}
     (base / 'report.json').write_text(json.dumps(output, ensure_ascii=False, indent=2), 'utf-8')
     (ROOT / 'tmp/publish-materials-latest.json').write_text(json.dumps(output, ensure_ascii=False, indent=2), 'utf-8')

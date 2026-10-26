@@ -184,6 +184,63 @@ def _paths_from_artifacts(project, kinds, extensions):
             and Path(a['path']).suffix.lower() in extensions]
 
 
+def _official_proof_images(project, selected, problems, warnings):
+    """Use only server-registered, confirmed official-window captures.
+
+    ``project.artifacts`` comes from the local server registry, never from a
+    packet manifest or a client's selected filename. This validates provenance
+    and current image bytes, not copyright or platform acceptance.
+    """
+    kinds = {'剪映工程截图': 'jianying', '即梦工程截图': 'jimeng'}
+    artifacts = [a for a in project.get('artifacts', []) if isinstance(a, dict)
+                 and a.get('kind') in kinds and isinstance(a.get('path'), str)]
+    automatic = selected is None
+    values = [a['path'] for a in artifacts] if automatic else selected
+    if not isinstance(values, (list, tuple)) or len(values) > MAX_ATTACHMENTS:
+        problems.append('工程证明图附件清单无效或数量过多')
+        return []
+    registered = {}
+    for artifact in artifacts:
+        try:
+            identity = os.path.normcase(str(Path(artifact['path']).expanduser().resolve()))
+            registered.setdefault(identity, []).append(artifact)
+        except (OSError, ValueError):
+            continue
+    files, seen = [], set()
+    for value in values:
+        try:
+            item = _file(value, IMAGE_EXT, maximum=100 * 1024**2)
+            identity = os.path.normcase(item['path'])
+            if identity in seen:
+                continue
+            provenance = None
+            for artifact in registered.get(identity, []):
+                evidence = artifact.get('officialEvidence')
+                if not isinstance(evidence, dict):
+                    continue
+                stamp = evidence.get('sha256')
+                if (evidence.get('source') == 'window_capture'
+                        and evidence.get('platform') == kinds[artifact['kind']]
+                        and evidence.get('appVerified') is True
+                        and evidence.get('projectConfirmedByUser') is True
+                        and isinstance(stamp, str)
+                        and re.fullmatch(r'[a-fA-F0-9]{64}', stamp)):
+                    actual = digest(item['path'])
+                    if actual == stamp.lower():
+                        provenance = {key: evidence[key] for key in (
+                            'source', 'platform', 'appVerified', 'sha256', 'projectConfirmedByUser')}
+                        provenance['sha256'] = actual
+                        break
+            if provenance is None:
+                raise ValueError('未登记为已核验官方窗口截图，请从工程页采集：' + item['name'])
+            item['officialEvidence'] = provenance
+            files.append(item)
+            seen.add(identity)
+        except (OSError, ValueError, TypeError) as error:
+            (warnings if automatic else problems).append('工程证明图：' + str(error))
+    return sorted(files, key=lambda f: natural(f['name']))
+
+
 def inspect(project, config=None, overrides=None, probe=None):
     """Inspect real selected artifacts; readiness means local completeness only."""
     config, overrides = config or {}, overrides or {}
@@ -217,8 +274,8 @@ def inspect(project, config=None, overrides=None, probe=None):
             files['cover'] = _file(cover, IMAGE_EXT, maximum=100 * 1024**2)
         except (OSError, ValueError, TypeError) as error:
             errors.append('封面：' + str(error))
+    files['proofImages'] = _official_proof_images(project, overrides.get('proofImages'), errors, warnings)
     mappings = {
-        'proofImages': ({'剪映工程截图', '工程记录'}, IMAGE_EXT, '工程证明图'),
         'storyboardImages': ({'源帧', '分镜截图', '分镜'}, IMAGE_EXT, '分镜截图'),
         'costImages': ({'成本报告图片', '成本比例图'}, IMAGE_EXT, '成本报告图片'),
         'copyrightImages': ({'版权证明', '授权证明'}, IMAGE_EXT, '授权证明附件'),
@@ -247,7 +304,7 @@ def inspect(project, config=None, overrides=None, probe=None):
     check('trialEpisodes', '试看集数', trial_ok, f'{trial} 集' if trial_ok else '请输入不超过总集数的正整数')
     check('totalCostYuan', '制作成本', bool(fields['totalCostYuan']), f'{fields["totalCostYuan"]:,.2f} 元' if fields['totalCostYuan'] else '请填写经核实的实际制作成本（元）')
     check('cover', '封面', bool(files['cover']), '已找到本地封面' if files['cover'] else '请选择封面图片', paths=[files['cover']['path']] if files['cover'] else [])
-    check('proofImages', '工程证明图', bool(files['proofImages']), f'{len(files["proofImages"])} 张。内容真实性及平台适用性需本人核对' if files['proofImages'] else '请提供真实制作记录或剪映工程截图', paths=[a['path'] for a in files['proofImages']])
+    check('proofImages', '官方工程截图', bool(files['proofImages']), f'{len(files["proofImages"])} 张，已核对官方窗口来源、本人关联确认及图片哈希；平台适用性需另行核对' if files['proofImages'] else '未登记为已核验官方窗口截图，请从工程页采集剪映或即梦实际界面', paths=[a['path'] for a in files['proofImages']])
     check('costReports', '成本报告文档', bool(files['costReports']), f'{len(files["costReports"])} 份' if files['costReports'] else '请先生成或补充成本报告文档', paths=[a['path'] for a in files['costReports']])
     check('costImages', '成本报告图片', bool(files['costImages']), f'{len(files["costImages"])} 张' if files['costImages'] else '请补充实际成本报告或比例表图片；Word/CSV未自动当作图片', paths=[a['path'] for a in files['costImages']])
     storyboard_min = _positive(config.get('publishStoryboardMin', 4), 100, True) or 4
@@ -256,8 +313,10 @@ def inspect(project, config=None, overrides=None, probe=None):
     check('rightsConfirmed', '素材授权确认', fields['rightsConfirmed'], '已由使用者确认制作与发布授权' if fields['rightsConfirmed'] else '请本人确认具有制作与发布所需授权')
     check('copyrightImages', '授权证明附件', bool(files['copyrightImages']), f'{len(files["copyrightImages"])} 张' if files['copyrightImages'] else '尚未添加；如后台要求，请补充真实授权证明', warn=True, paths=[a['path'] for a in files['copyrightImages']])
     check('videos', '正片文件', bool(files['videos']), f'{len(files["videos"])} 个，按文件名自然排序' if files['videos'] else '未找到明确成片；源视频不会自动视为已完成正片', paths=[a['path'] for a in files['videos']])
-    if files['proofImages'] and not any(a.get('kind') == '剪映工程截图' for a in project.get('artifacts', []) if isinstance(a, dict)):
-        warnings.append('工程证明图片仅核对文件存在，不代表已验证剪映编辑过程或平台认可')
+    if files['proofImages']:
+        warnings.append('官方窗口截图来源及文件完整性核验不代表版权、完整制作过程或平台审核认可')
+    if any(a.get('kind') in {'工程记录', '分轨工程图', '待核对工程截图'} for a in project.get('artifacts', []) if isinstance(a, dict)):
+        warnings.append('历史拼接制作记录、分轨布局图及手动导入图片不计入已核验官方工程截图')
     if fields['dramaType'] == 'digital':
         warnings.append('数字真人的演员、肖像及其他后台必填资料需在官方页面逐项核对')
     plan = {'version': VERSION, 'projectId': str(project.get('id', '')), 'title': fields['title'],
@@ -357,7 +416,7 @@ def inspect_folder(folder, config=None, overrides=None, probe=None):
     videos = _known_files(root, ('yiquchong', '正片', '分集', 'videos'), VIDEO_EXT)
     videos += [p for p in root.iterdir() if p.is_file() and p.suffix.lower() in VIDEO_EXT]
     artifacts = []
-    groups = [('工程记录', ('jy', '工程记录', 'proof'), IMAGE_EXT),
+    groups = [('待核对工程截图', ('jy', '工程记录', 'proof'), IMAGE_EXT),
               ('源帧', ('fenjing', '分镜', '分镜截图', 'storyboards'), IMAGE_EXT),
               ('成本报告图片', ('zhengming', '成本报告', 'cost'), IMAGE_EXT),
               ('成本报告', ('成本报告', 'cost'), REPORT_EXT),
@@ -380,6 +439,7 @@ def inspect_folder(folder, config=None, overrides=None, probe=None):
     plan = inspect(project, config, metadata | (overrides or {}), probe)
     if packet:
         plan['warnings'].append('已按本软件资料包清单重新检查文件；导出清单本身不是平台提交或授权凭证')
+        plan['warnings'].append('资料包内的截图来源声明不会继承为本机已核验记录；请在工程页重新采集并确认')
     if (root / '已经发布成功.txt').exists():
         plan['warnings'].append('目录含历史成功标记；本次未据此判断已提交或跳过，需核对账号及平台回执')
     return plan
@@ -475,8 +535,15 @@ def export_packet(plan, destination, *, cancel=None, progress=None):
                 if (after.st_size, after.st_mtime_ns) != (item['bytes'], item['mtimeNs']) or digest(target, cancel) != before:
                     raise ValueError('复制校验失败或源文件变化：' + source.name)
                 shutil.copystat(source, target)
-                manifest['files'].append({'group': group, 'name': target.relative_to(directory).as_posix(),
-                                          'bytes': current['bytes'], 'sha256': before})
+                entry = {'group': group, 'name': target.relative_to(directory).as_posix(),
+                         'bytes': current['bytes'], 'sha256': before}
+                if group == 'proofImages':
+                    evidence = item.get('officialEvidence')
+                    if not isinstance(evidence, dict) or evidence.get('sha256') != before:
+                        raise ValueError('官方截图来源与文件不一致，请从工程页重新采集')
+                    entry['officialEvidence'] = copy.deepcopy(evidence)
+                    entry['provenanceTrust'] = 'revalidate-against-local-registry-on-import'
+                manifest['files'].append(entry)
         path = directory / 'manifest.json'
         path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), 'utf-8')
         (directory / '提交前核对.txt').write_text('本目录为本地资料准备包，未执行平台提交。\n请在官方后台核对剧名、集数、制作方、成本、授权与附件，再由本人确认提交。\n资料齐全不代表审核通过。\n', 'utf-8-sig')

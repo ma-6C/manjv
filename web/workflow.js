@@ -2,7 +2,7 @@
 
 let studioIndex=0,regionIndex=0,studioDraft=null,studioDrag=null,previewSignature='';
 const studioTimes=new Map();
-const jobLabels={pipeline:'完整制作',transcode:'重组分集',subtitle:'去字幕',preview:'短片试处理',playback:'兼容播放预览',video_generate:'历史视频生成（已停用）',highlight:'高光包装',cover:'制作封面',coverAI:'AI封面',rewrite:'AI文案',records:'工程记录',cost:'成本报告',package:'材料包',upload:'视频上传',login:'账号登录'};
+const jobLabels={pipeline:'完整制作',transcode:'重组分集',subtitle:'去字幕',preview:'短片试处理',playback:'兼容播放预览',video_generate:'历史视频生成（已停用）',highlight:'高光包装',cover:'制作封面',coverAI:'AI封面',rewrite:'AI文案',records:'制作记录',cost:'成本报告',package:'材料包',upload:'视频上传',login:'账号登录'};
 const statusLabels={queued:'排队中',running:'处理中',pausing:'正在暂停',paused:'已暂停',interrupted:'待恢复',completed:'已完成',failed:'失败',cancelled:'已停止'};
 function regions(){return studioDraft||state.config.subtitleRegions?.length&&state.config.subtitleRegions||[state.config.subtitleRegion];}
 function studioVideo(){const p=activeProject();return p?.videos[Math.min(studioIndex,p.videos.length-1)];}
@@ -16,7 +16,7 @@ function pipelineActivitySteps(job=null){
  steps.push(['画面处理与分集',c.regroup?`每集 ${c.segmentSeconds} 秒`:'保持源分集',['video']]);
  if(c.pipelineHighlight)steps.push(['成片包装','使用处理后的最终分集',['highlight']]);
  if(c.autoCover)steps.push(['封面','生成剧集封面',['cover']]);
- if(c.autoRecords)steps.push(['工程记录','保存真实帧与文件校验值',['records']]);
+ if(c.autoRecords)steps.push(['制作记录','保存实际文件与处理结果校验值',['records']]);
  if(c.autoCost)steps.push(['成本报告','按实际支出生成',['cost']]);
  return steps;
 }
@@ -28,7 +28,7 @@ function productionSetupHTML(){
  toggle('AI 剧名与简介','autoText','使用已选择的文字接口；缺少配置时在开始前提示。')+
  toggle('合并后生成高光包装','pipelineHighlight','直接使用本次分集结果继续包装。')+
  toggle('自动制作封面','autoCover','使用本地排版；生图方式沿用 AI 接口页的封面配置。')+
- toggle('生成工程记录','autoRecords','记录实际源帧、参数和成片校验值。')+
+ toggle('保存实际制作记录','autoRecords','记录实际文件与处理结果，不绘制工程界面。官方截图在剪映工程页采集。')+
  toggle('生成成本报告','autoCost','按成本报告页填写的实际金额生成。')+`</div><p class="field-hint">字幕选区在 <a href="#subtitle">AI 去字幕</a> 调整，文案接口在 <a href="#api">AI 接口</a> 配置。完成所选步骤后可核对发布材料。</p>`);
 }
 function productionContinuationButton(job){

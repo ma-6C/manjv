@@ -46,6 +46,7 @@ import jianying_projects
 import highlight_render
 import lama_local
 import publish_workflow
+import project_evidence
 DATA = runtime_paths.data_home()
 DATA.mkdir(parents=True, exist_ok=True)
 PUBLIC = ROOT / 'web'
@@ -56,6 +57,7 @@ QUEUE_WAKE = threading.Event()
 QUEUE_STOP = threading.Event()
 SOURCE_MANAGER = None
 PUBLISH_WORKSPACE = None
+EVIDENCE_MANAGER = None
 LOCAL_JOB_KINDS = {'pipeline','transcode','subtitle','preview','playback','rewrite','cover','coverAI','records','cost','highlight','package','hook','promotion_package','track_sheet','jianying_project'}
 SECRETS = {'apiKey': '', 'subtitleKey': ''}
 FFMPEG = os.environ.get('FFMPEG_EXE') or shutil.which('ffmpeg')
@@ -135,6 +137,10 @@ for item in read_json(DATA / 'jobs.json', []):
     if item.get('status') in ['queued','running','pausing']:
         item.update(status='interrupted',stage='上次运行已中断，确认后继续',interruptedAt=time.time())
     item.update(cancel=threading.Event(),processes=set())
+    if item.get('kind')=='track_sheet':
+        item['moduleRetired']=True
+        if item.get('status') in ('queued','running','pausing','interrupted','paused'):
+            item.update(status='cancelled',stage='自绘工程图已移除，请改用剪映工程与实际窗口截图',finished=time.time())
     JOBS[item['id']] = item
 
 def replace_state_file(temporary,target):
@@ -475,49 +481,8 @@ def track_plan(body):
     return {'ok':not errors,'errors':errors,'count':len(videos),'files':files,'tracks':opts['tracks'],'width':opts['width']}
 
 def track_sheet_batch(ids,cfg,jid):
-    job=JOBS[jid];opts=job['options']['trackSheet'];order=job['options']['trackOrder']
-    videos={v['path']:(p,v) for pid in ids for p in [get_project(pid)] for v in p['videos']}
-    total=len(order);done=0;failures=[];results=job.setdefault('trackResults',[])
-    telemetry.batch(job,'track_sheets','分轨工程图',total,done)
-    for index,path in enumerate(order):
-        if job['cancel'].is_set():raise InterruptedError('分轨任务已停止')
-        p,video=videos[path];job['project']=p['name'];key=f'{p["id"]}:tracks:'+hashlib.sha256(path.encode()).hexdigest()[:16]
-        previous=next((r for r in results if r.get('sourcePath')==path),None);files=cached(jid,key)
-        if files and previous:
-            try:
-                if sha256(previous['path'])!=previous['imageSHA256'] or sha256(previous['manifest'])!=previous['manifestSHA256']:raise ValueError('工程图或分析记录校验不符')
-            except (OSError,ValueError,KeyError):files=None
-        if files and previous:
-            done+=1;telemetry.batch(job,'track_sheets','分轨工程图',total,done);stage(jid,f'复用已完成工程图：{video["name"]}',done/total*100);continue
-        progress={'phase':None,'tid':None}
-        labels={'hash':('核对源视频','bytes'),'device':('检测解码设备','files'),'decode':('解码与抽帧','seconds'),'analyze':('识别镜头分段','frames'),'cache':('复用视频分析','files'),'render':('绘制并保存PNG','files')}
-        def notify(phase,value,length):
-            if job['cancel'].is_set():raise InterruptedError('分轨任务已停止')
-            if phase=='backend':job['trackDevice']=value;return
-            if progress['phase']!=phase:
-                if progress['tid']:telemetry.finish(job,progress['tid'])
-                label,unit=labels.get(phase,('分析视频','seconds'))
-                progress['phase']=phase;progress['tid']=telemetry.begin(job,label,video['name'],length,unit)
-                stage(jid,f'{index+1}/{total} · {label} · {video["name"]}',done/total*100)
-            telemetry.advance(job,progress['tid'],value,length)
-        try:
-            result=track_sheets.generate(video,opts,DATA/'track-sheet-cache',FFMPEG,
-                lambda args,observe=None,timeout=None:run_process(args,jid,timeout=timeout,observe=observe,track=progress['tid']),
-                job['cancel'],index,notify)
-            result.update(projectId=p['id'],sourcePath=path)
-            register(p,Path(result['path']),'分轨工程图',jid);register(p,Path(result['manifest']),'分轨分析记录',jid)
-            results[:]=[r for r in results if r.get('sourcePath')!=path];results.append(result)
-            checkpoint(jid,key,[result['path'],result['manifest']]);done+=1
-            if progress['tid']:telemetry.finish(job,progress['tid'])
-            job['trackDevice']=result['device'];telemetry.batch(job,'track_sheets','分轨工程图',total,done)
-            log(('复用缓存，' if result['cacheHit'] else '')+'已生成分轨工程图：'+video['name'],job=jid)
-        except InterruptedError:raise
-        except Exception as error:
-            failures.append({'name':video['name'],'message':str(error)[:400]});log('分轨失败：'+video['name']+' · '+str(error)[:200],level='warning',job=jid)
-        job['trackErrors']=list(failures);persist_jobs()
-    job['trackErrors']=failures;job['result']={'files':[r['path'] for r in results],'completed':len(results),'failed':len(failures)}
-    if failures:raise ValueError(f'已完成{len(results)}张工程图，{len(failures)}集失败；可重试未完成部分。'+failures[0]['name']+'：'+failures[0]['message'])
-    if 'track_sheet' not in job['completedStages']:job['completedStages'].append('track_sheet')
+    raise ValueError('自绘工程图功能已移除，请生成剪映工程并采集官方窗口截图')
+
 
 def jianying_request(body):
     opts=jianying_projects.options(body.get('jianying',STATE.get('jianyingOptions',{})))
@@ -1113,39 +1078,27 @@ def sha256(path):
     return h.hexdigest()
 
 def records(p,cfg,job):
-    from PIL import Image,ImageDraw,ImageOps
-    out=project_dir(p,cfg)/'工程记录'/job
+    # A measured source/processing log is not an official editor screenshot.
+    out=project_dir(p,cfg)/'制作记录'/job
     out.mkdir(parents=True,exist_ok=True)
-    sheet=Image.new('RGB',(1600,1250),'#f5f6fa'); d=ImageDraw.Draw(sheet)
-    d.text((50,30),p['name']+' 制作记录',font=font(40),fill='#24243d')
-    d.text((50,96),'源文件抽帧 · 实际处理参数 · SHA256校验',font=font(24),fill='#55556c')
-    evidence=[]
-    total=sum(v['duration'] for v in p['videos'])
+    hashes={v['path']:sha256(v['path']) for v in p['videos']}
+    frames=[];total=sum(v['duration'] for v in p['videos'])
     for i in range(4):
-        global_t=total*(i+.5)/4
-        rem=global_t
-        v=p['videos'][-1]
-        for current in p['videos']:
-            v=current
-            if rem<current['duration']:
-                break
-            rem-=current['duration']
-        at=min(max(0,rem),max(0,v['duration']-.05))
-        path=out/f'源帧_{i+1}.jpg'
-        get_frame(v['path'],path,at,job)
-        evidence.append({'frame':path.name,'source':v['path'],'timestamp':round(at,3),'sourceSHA256':sha256(v['path'])})
-        image=ImageOps.pad(Image.open(path).convert('RGB'),(730,420),color='#e8e9ef')
-        x=50+(i%2)*770; y=160+(i//2)*500
-        sheet.paste(image,(x,y));d.text((x,y+432),f'{v["name"][:28]}  |  {at:.2f}s',font=font(22),fill='#35354e')
-        register(p,path,'源帧',job)
-    d.text((50,1180),'记录时间 '+time.strftime('%Y-%m-%d %H:%M:%S')+'   仅记录实际操作，不代表平台审核结论',font=font(22),fill='#55556c')
-    image=out/'工程记录.jpg';sheet.save(image,quality=94);register(p,image,'工程记录',job)
-    manifest=out/'工程记录.json'
-    publiccfg={k:v for k,v in cfg.items() if k in DEFAULT}
+        remaining=total*(i+.5)/4;video=p['videos'][-1]
+        for candidate in p['videos']:
+            video=candidate
+            if remaining<candidate['duration']:break
+            remaining-=candidate['duration']
+        at=min(max(0,remaining),max(0,video['duration']-.05));path=out/f'真实分镜帧_{i+1}.jpg'
+        get_frame(video['path'],path,at,job);register(p,path,'分镜截图',job)
+        frames.append({'frame':path.name,'source':video['name'],'timestamp':round(at,3),'sourceSHA256':hashes[video['path']]})
+    manifest=out/'制作记录.json'
     manifest.write_text(json.dumps({'project':p['name'],'job':job,'created':time.strftime('%Y-%m-%d %H:%M:%S'),
-        'sourceFrames':evidence,'parameters':publiccfg,
-        'outputs':[{'file':a['path'],'sha256':sha256(a['path'])} for a in final_videos(p)]},ensure_ascii=False,indent=2),'utf-8')
-    register(p,manifest,'工程记录',job)
+        'kind':'processing_log','officialScreenshot':False,
+        'inputs':[{'name':v['name'],'sha256':hashes[v['path']]} for v in p['videos']],'sourceFrames':frames,
+        'outputs':[{'file':a['path'],'sha256':sha256(a['path'])} for a in final_videos(p)],
+        'note':'仅记录实际文件与处理结果，不绘制工程界面。官方工程截图请在剪映或即梦实际项目中采集。'},ensure_ascii=False,indent=2),'utf-8')
+    register(p,manifest,'制作记录',job)
 
 def costs(p,cfg,job):
     from docx import Document
@@ -1253,9 +1206,12 @@ def package(p,cfg,job):
         raise ValueError('尚未生成分集视频，请先运行制作流水线')
     if not p['intro'].strip():raise ValueError('请先填写剧集简介')
     artifacts=[]
-    for kind in ['封面','工程记录','成本报告']:
+    for kind in ['封面','制作记录','成本报告']:
         items=[a for a in p['artifacts'] if a['kind']==kind and Path(a['path']).is_file()]
         if items:artifacts.extend(a for a in items if a['job']==items[-1]['job'])
+    verified=publish_workspace().inspect(p['id'])['files']['proofImages']
+    paths={v['path'] for v in verified}
+    artifacts.extend(a for a in p['artifacts'] if a['path'] in paths)
     if not any(a['kind']=='封面' for a in artifacts):raise ValueError('请先制作封面')
     artifacts=final+artifacts
     path=project_dir(p,cfg)/f'发布材料_{job}.zip'
@@ -1340,12 +1296,12 @@ def production_plan(kind,cfg,continuing=False):
         steps.append(['复用已完成分集' if continuing else '画面处理与分集','保留已有分集，不重复编码' if continuing else (f"每集 {cfg['segmentSeconds']} 秒" if cfg['regroup'] else '保持源分集'),['video']])
         if cfg['pipelineHighlight']:steps.append(['成片包装','使用本次处理后的分集',['highlight']])
         if cfg['autoCover']:steps.append(['制作封面','生成剧集封面',['cover']])
-        if cfg['autoRecords']:steps.append(['工程记录','保存真实帧与文件校验值',['records']])
+        if cfg['autoRecords']:steps.append(['制作记录','保存实际文件与处理结果校验值',['records']])
         if cfg['autoCost']:steps.append(['成本报告','按本次配置生成',['cost']])
     else:
         names={'transcode':('仅合并切分','单步完成后结束',['video']),'subtitle':('仅去字幕','单步完成后结束',['subtitle']),
                'highlight':('高光包装','单独处理当前成片',['highlight']),'cover':('制作封面','单独生成封面',['cover']),
-               'coverAI':('AI封面','使用所选生图接口',['cover']),'records':('工程记录','单独生成记录',['records']),
+               'coverAI':('AI封面','使用所选生图接口',['cover']),'records':('制作记录','保存实际处理记录',['records']),
                'cost':('成本报告','单独生成报告',['cost']),'rewrite':('AI文案','单独改写剧名与简介',['text']),
                'package':('整理发布材料','导出本地材料',['package']),
                'jianying_project':('剪映真实工程','复制素材并生成可编辑时间线',['jianying_project'])}
@@ -1439,7 +1395,7 @@ def worker(jid,ids,kind,cfg):
             if kind in ['cover','coverAI'] or (kind=='pipeline' and cfg['autoCover']):
                 stage(jid,'制作封面',75);step('cover',lambda:cover(p,cfg,jid,ai=kind=='coverAI' or (kind=='pipeline' and cfg['autoAICover'])))
             if kind=='records' or (kind=='pipeline' and cfg['autoRecords']):
-                stage(jid,'生成真实工程记录',82);step('records',lambda:records(p,cfg,jid))
+                stage(jid,'保存实际制作记录',82);step('records',lambda:records(p,cfg,jid))
             if kind=='cost' or (kind=='pipeline' and cfg['autoCost']):
                 stage(jid,'生成成本报告',90);step('cost',lambda:costs(p,cfg,jid))
             if kind=='package':stage(jid,'整理发布材料',80);step('package',lambda:package(p,cfg,jid))
@@ -1518,6 +1474,7 @@ def control_job(jid,action):
         job=JOBS.get(jid)
         if not job:raise ValueError('任务不存在')
         if action=='resume':
+            if job['kind']=='track_sheet':raise ValueError('自绘工程图功能已移除，历史文件保留；请到剪映工程与截图建立真实工程')
             if job['kind']=='video_generate':raise ValueError('视频生成功能已移除，历史任务不能恢复；已有视频仍可使用')
             if job['kind'] not in LOCAL_JOB_KINDS:raise ValueError('登录或上传任务不能自动恢复，请在发布页重新核对并发起')
             if job['status'] not in ['paused','interrupted','failed','cancelled']:raise ValueError('该任务不能恢复')
@@ -1553,6 +1510,7 @@ def shutdown_jobs():
     vsr_pool.POOL.close()
     lama_local.POOL.close()
     if PUBLISH_WORKSPACE is not None:PUBLISH_WORKSPACE.shutdown()
+    if EVIDENCE_MANAGER is not None:EVIDENCE_MANAGER.shutdown()
 
 def hook_inputs(p,kind):
     if kind=='original':return p['videos']
@@ -1616,6 +1574,7 @@ def job_preflight(body):
 def create_job(body):
     licensing.require(DATA)
     kind=body.get('kind','pipeline')
+    if kind=='track_sheet':raise ValueError('自绘工程图功能已移除，请改用剪映可编辑工程和官方窗口截图')
     if kind not in LOCAL_JOB_KINDS|{'login','upload'}:
         raise ValueError('未知任务类型')
     ids=body.get('ids',[])
@@ -1757,7 +1716,7 @@ def public_state():
         result['jobs']=[{**{k:v for k,v in j.items() if k not in ['cancel','processes','config','sourceSnapshot','checkpoints']},
                          'workflowPlan':production_plan(j['kind'],j['config'],bool(j.get('options',{}).get('continueFromJob'))),
                          'telemetry':telemetry.snapshot(j),'completedProjects':sum(k.endswith(':project-done') for k in j.get('checkpoints',{})),
-                         'checkpointCount':len(j.get('checkpoints',{})), 'resumable':j['kind'] in LOCAL_JOB_KINDS} for j in JOBS.values()][-200:]
+                         'checkpointCount':len(j.get('checkpoints',{})), 'resumable':j['kind'] in LOCAL_JOB_KINDS and j['kind']!='track_sheet'} for j in JOBS.values()][-200:]
         result['secrets']={k:bool(v) for k,v in SECRETS.items()}
         result['aiKeyStatus']=ai.key_status(result['config'])
         result['aiProviders']=ai.PRESETS
@@ -1788,6 +1747,36 @@ def publish_workspace():
                     return project,config
             PUBLISH_WORKSPACE=publish_workflow.Workspace(STATE,DATA,LOCK,save,snapshot,probe)
         return PUBLISH_WORKSPACE
+
+
+def evidence_manager():
+    global EVIDENCE_MANAGER
+    with LOCK:
+        if EVIDENCE_MANAGER is None:
+            def record(pid,path,kind,evidence):
+                p=get_project(pid);register(p,path,kind,'official-'+uuid.uuid4().hex[:10])
+                artifact=next(a for a in p['artifacts'] if a['path']==str(path))
+                artifact['officialEvidence']=copy.deepcopy(evidence);save()
+            EVIDENCE_MANAGER=project_evidence.Manager(STATE,DATA,LOCK,save,record)
+        return EVIDENCE_MANAGER
+
+
+def editor_result(body):
+    job=JOBS.get(body.get('jobId'));index=body.get('index',0)
+    if not job or job['kind']!='jianying_project' or type(index) is not int or not 0<=index<len(job.get('jianyingResults',[])):
+        raise ValueError('请选择已完成的剪映工程')
+    return job,job['jianyingResults'][index]
+
+
+def evidence_association(body):
+    pid=body.get('projectId','');p=get_project(pid)
+    result={'projectId':pid,'projectName':p['name'],'status':'本人确认画面内容，官方窗口来源另行核验','userConfirmed':body.get('userConfirmed') is True}
+    if body.get('jobId'):
+        job,row=editor_result(body)
+        if row.get('projectId')!=pid:raise ValueError('工程与所选剧目不匹配')
+        result.update(jobId=job['id'],index=body.get('index',0),draftDirectory=row.get('editorImport',{}).get('directory',row['directory']),
+                      draftName=row.get('editorImport',{}).get('name',row['name']),sourceSHA256=row['sourceSHA256'])
+    return result
 
 def allowed_file(path):
     path=Path(path).resolve()
@@ -1857,6 +1846,9 @@ class Handler(BaseHTTPRequestHandler):
             if url.path=='/api/publish/workspace':
                 licensing.require(DATA)
                 return self.reply(value=publish_workspace().public())
+            if url.path=='/api/project-evidence/list':
+                licensing.require(DATA);pid=q.get('projectId',[''])[0];get_project(pid)
+                return self.reply(value=evidence_manager().list(pid))
             if url.path=='/api/publish/file':
                 licensing.require(DATA)
                 return self.file(publish_workspace().file(q.get('projectId',[''])[0],q.get('path',[''])[0]),q.get('download',['0'])[0]=='1')
@@ -1913,6 +1905,16 @@ class Handler(BaseHTTPRequestHandler):
             if not isinstance(body,dict):raise ValueError('请求必须为对象')
             if path=='/api/license/activate':return self.reply(value=licensing.activate(DATA,body.get('token','')))
             licensing.require(DATA)
+            if path=='/api/project-evidence/capture':
+                association=evidence_association(body)
+                return self.reply(value=evidence_manager().capture(association['projectId'],body,association))
+            if path=='/api/project-evidence/import':
+                association=evidence_association(body)
+                return self.reply(value=evidence_manager().import_images(association['projectId'],body,association))
+            if path=='/api/project-evidence/open':
+                if body.get('platform')!='jimeng':raise ValueError('请通过剪映工程入口打开本机编辑器')
+                opened=webbrowser.open('https://jimeng.jianying.com/')
+                return self.reply(value={'opened':bool(opened),'note':'请本人打开即梦实际项目或智能画布，再从工程页采集；没有执行图片生成或扣费'})
             if path=='/api/publish/inspect':return self.reply(value=publish_workspace().inspect(body.get('projectId',''),body.get('overrides')))
             if path=='/api/publish/settings':return self.reply(value=publish_workspace().settings(body.get('projectId',''),body.get('overrides',{})))
             if path=='/api/publish/discover':return self.reply(value=publish_workspace().discover(body.get('folder','')))
@@ -1923,6 +1925,16 @@ class Handler(BaseHTTPRequestHandler):
             if path=='/api/publish/open':return self.reply(value=publish_workspace().open(body.get('projectId',''),body.get('taskId',''),body.get('key','')))
             if path=='/api/tracks/import':return self.reply(value=import_track_files(body.get('paths')))
             if path=='/api/jianying/status':return self.reply(value=jianying_projects.status(body.get('jianying',STATE.get('jianyingOptions',{}))))
+            if path in ('/api/jianying/install','/api/jianying/launch'):
+                job,row=editor_result(body)
+                opts=jianying_projects.options(body.get('options',STATE.get('jianyingOptions',{})))
+                if path.endswith('/install'):
+                    result=jianying_projects.install_to_editor(row['directory'],opts)
+                    with LOCK:row['editorImport']=result;STATE['jianyingOptions']=opts;save()
+                else:
+                    result=jianying_projects.open_in_editor(row.get('editorImport',{}).get('directory',row['directory']),opts)
+                    with LOCK:STATE['jianyingOptions']=opts;save()
+                return self.reply(value=result)
             if path=='/api/jianying/plan':
                 options,videos=jianying_request(body)
                 return self.reply(value={'count':len(videos),'duration':sum(v['duration'] for v in videos),'sourceKind':options['sourceKind'],'editorValidated':False})
@@ -1936,7 +1948,7 @@ class Handler(BaseHTTPRequestHandler):
             if path=='/api/highlight/templates':
                 cfg=validate_config(STATE['config']|{'highlightTailDirectory':body.get('directory',STATE['config']['highlightTailDirectory'])})
                 return self.reply(value={'files':[p.name for p in highlight_render.templates(cfg)]})
-            if path=='/api/tracks/plan':return self.reply(value=track_plan(body))
+            if path=='/api/tracks/plan':raise ValueError('自绘工程图已移除，请改用剪映真实工程与官方窗口截图')
             if path=='/api/tracks/options':
                 with LOCK:STATE['trackSheetOptions']=track_sheets.options(body);save()
                 return self.reply(value={'options':STATE['trackSheetOptions']})
@@ -1949,27 +1961,8 @@ class Handler(BaseHTTPRequestHandler):
                         if sep and index.strip().isdigit() and int(index.strip())<32:devices.append({'index':int(index.strip()),'name':name.strip()})
                 except (OSError,subprocess.TimeoutExpired):pass
                 return self.reply(value={'devices':devices,'note':'任务按素材实测硬件解码；镜头分析和PNG绘图使用CPU'})
-            if path=='/api/tracks/open':
-                job=JOBS.get(body.get('id'));index=body.get('index',0)
-                if not job or job['kind']!='track_sheet' or type(index) is not int or not 0<=index<len(job.get('trackResults',[])):raise ValueError('没有对应的工程图结果')
-                target=allowed_file(job['trackResults'][index]['path']).parent
-                if os.name=='nt':os.startfile(str(target))
-                return self.reply(value={'path':str(target)})
-            if path=='/api/tracks/export':
-                job=JOBS.get(body.get('id'))
-                if not job or job['kind']!='track_sheet' or not job.get('trackResults'):raise ValueError('请先生成工程图')
-                if job['status'] in ['running','queued','pausing']:raise ValueError('请等待当前任务结束后导出')
-                rows=copy.deepcopy(job['trackResults']);directory=DATA/'exports';directory.mkdir(exist_ok=True)
-                target=directory/('分轨工程图_'+job['id']+'_'+uuid.uuid4().hex[:8]+'.zip');temp=target.with_suffix('.part')
-                try:
-                    with zipfile.ZipFile(temp,'w',compression=zipfile.ZIP_STORED) as archive:
-                        for i,row in enumerate(rows):
-                            image=allowed_file(row['path']);record=allowed_file(row['manifest'])
-                            if sha256(image)!=row['imageSHA256'] or sha256(record)!=row.get('manifestSHA256'):raise ValueError('工程图或分析记录已修改，请重新生成后导出')
-                            archive.write(image,f'{i+1:02d}_{image.name}');archive.write(record,f'{i+1:02d}_{record.name}')
-                    temp.replace(target);register(get_project(rows[0]['projectId']),target,'工程图压缩包',job['id'])
-                finally:temp.unlink(missing_ok=True)
-                return self.reply(value={'path':str(target),'count':len(rows)})
+            if path in ('/api/tracks/open','/api/tracks/export'):
+                raise ValueError('旧自绘工程图入口已停用，请使用官方编辑器实际截图')
             if path=='/api/source/resolve':
                 value=source_manager().resolve(body.get('text',''),body.get('refresh') is True);return self.reply(value=value)
             if path=='/api/source/start':return self.reply(value=source_manager().start(body))
@@ -2144,6 +2137,11 @@ class Handler(BaseHTTPRequestHandler):
                 return self.reply(value={'removed':True})
             if path=='/api/browse':
                 mode=body.get('mode','folder')
+                if mode=='editor':
+                    script="Add-Type -AssemblyName System.Windows.Forms; $d=New-Object System.Windows.Forms.OpenFileDialog; $d.Filter='JianyingPro.exe|JianyingPro.exe'; [Console]::OutputEncoding=[System.Text.Encoding]::UTF8; if($d.ShowDialog() -eq 'OK'){Write-Output $d.FileName}"
+                    proc=subprocess.run(['powershell','-NoProfile','-STA','-Command',script],capture_output=True,timeout=180,creationflags=getattr(subprocess,'CREATE_NO_WINDOW',0))
+                    if proc.returncode:raise ValueError('剪映主程序选择窗口未能打开')
+                    return self.reply(value={'path':proc.stdout.decode('utf-8-sig','replace').strip()})
                 if mode in ('images','documents'):
                     file_filter='Images|*.jpg;*.jpeg;*.png;*.webp' if mode=='images' else 'Reports|*.pdf;*.docx;*.csv;*.jpg;*.jpeg;*.png;*.webp'
                     script="Add-Type -AssemblyName System.Windows.Forms; $d=New-Object System.Windows.Forms.OpenFileDialog; $d.Filter='"+file_filter+"'; $d.Multiselect=$true; [Console]::OutputEncoding=[System.Text.Encoding]::UTF8; if($d.ShowDialog() -eq 'OK'){ ConvertTo-Json -Compress -InputObject @($d.FileNames) } else { Write-Output '[]' }"

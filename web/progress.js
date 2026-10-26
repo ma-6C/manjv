@@ -35,7 +35,7 @@ function monitorNotice(job){
  if(['paused','interrupted','cancelled'].includes(job.status))return ['warning',cloud?'本机查询已停止，云端任务可能继续':'已完成结果与检查点保留',cloud?'继续时查询原云端任务，不重复提交。云端可能继续生成和计费，取消云端任务需到对应平台核对。':'继续后跳过有效检查点，当前未完成视频重新处理；不承诺帧级续跑。'];
  if(job.status==='pausing')return ['warning','正在处理暂停请求','等待当前进程退出后才会显示已暂停。当前未完成视频不计入完成数量。'];
  if(job.gpuFallback)return ['warning','已自动切换 CPU 编码',`${job.gpuFallback.detail}。${job.status==='completed'?'制作已完成，可核对输出结果。':'已完成视频和队列保留，继续处理剩余部分。'}下载队列不受此编码设置影响。`];
- if(job.status==='completed')return ['success','制作任务已完成','输出和工程记录保留在本机，可以打开文件夹核对结果。'];
+ if(job.status==='completed')return ['success','制作任务已完成','输出和制作记录保留在本机，可以打开文件夹核对结果。'];
  if(cloud)return ['',job.remoteVideo?.taskId?'原云端任务已记录':'正在提交或查询生成任务','平台未提供百分比时只展示真实状态；请勿重复点击生成。网络异常时可核对原任务 ID 后继续。'];
  if(r&&job.status==='running'&&Date.now()/1000-(r.progressAt||r.startedAt)>25)return ['','此阶段暂未返回新进度','服务仍在响应，模型或编码进程可能正在进行耗时操作。请查看最后反馈时间与日志，未因此自动判定失败。'];
  return ['','原始素材保留',r?.percent==null?'模型加载或当前步骤没有可测量总量时，显示阶段与耗时；收到实际数据后再显示百分比。':'当前进度来自实际处理时长、帧数或下载字节。预计时间仅适用于当前步骤，会随速度变化。'];
