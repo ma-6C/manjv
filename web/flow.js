@@ -2,7 +2,7 @@
 // The server owns dispatch and checkpoints. This module follows real stages; it
 // never starts a production job from a polling or navigation callback.
 (()=>{
- const ui={flows:[],activeFlowId:'',following:false,preparingNext:false,seen:new Map(),expectedHash:'',pending:null,busy:false,error:'',query:'',projectIds:new Set(),paths:new Set(),selectionReady:false,projectSignature:'',detailSignature:'',stripSignature:'',options:{withJianying:true,withEvidence:true,withExport:true,withPublish:false,reviewRequired:false,accountId:''}};
+ const ui={flows:[],activeFlowId:'',following:true,preparingNext:false,seen:new Map(),pending:null,busy:false,error:'',query:'',projectIds:new Set(),paths:new Set(),selectionReady:false,viewStage:'',panelKey:'',panelUpdating:false,returnFocus:null,options:{withJianying:true,withEvidence:true,withExport:true,withPublish:false,reviewRequired:false,accountId:''}};
  const labels={queued:'待开始',dispatching:'正在启动',running:'进行中',waiting_action:'等待操作',waiting_confirmation:'等待本人确认',paused:'已暂停',interrupted:'需要恢复',failed:'未完成',completed:'已完成',cancelled:'已停止',pending:'待处理',skipped:'已跳过'};
  const terminal=new Set(['completed','cancelled']);
  pages.unshift(['studio','开始工作','play']);navigationSections.unshift(['连续制作',['studio']]);navigationLabels.studio='开始工作';
@@ -10,7 +10,6 @@
  const active=()=>ui.flows.find(f=>f.id===ui.activeFlowId)||null;
  const stages=f=>Array.isArray(f?.stages)?f.stages:[];
  const stage=f=>f?.status==='completed'?{key:'completed',label:'所选流程已完成',route:'studio',status:'completed',message:f.message}:stages(f).find(s=>(s.key||s.name)===f?.currentStage)||stages(f).find(s=>['dispatching','running','waiting_action','waiting_confirmation','failed','interrupted'].includes(s.status))||stages(f).filter(s=>s.status!=='skipped').at(-1)||{};
- const route=f=>f?.status==='completed'?'studio':String(f?.route||stage(f).route||'studio').replace(/^#/, '');
  const selectedVideos=()=>state.projects.flatMap(p=>ui.projectIds.has(p.id)?p.videos.filter(v=>ui.paths.has(v.path)):[]);
  const selectedProjects=()=>state.projects.filter(p=>ui.projectIds.has(p.id)&&p.videos.some(v=>ui.paths.has(v.path)));
  function overview(f){
@@ -23,7 +22,7 @@
   if(!f)return '';
   if(f.status==='completed')return '<div class="studio-flow-actions"><button class="button small" data-flow="view-output">查看成品</button></div>';
   const waiting=['waiting_action','waiting_confirmation','failed','interrupted','paused'].includes(f.status),s=stage(f),needs=waiting||['waiting_action','failed','interrupted','paused'].includes(s.status);
-  return `<div class="studio-flow-actions">${!terminal.has(f.status)?`<button class="button small" data-flow="${needs?(s.key==='review'?'review-confirm':'continue'):'pause'}" data-id="${esc(f.id)}">${needs?(f.status==='paused'?'恢复流程':s.key==='review'?'我已检查成片，继续':'检查并继续'):'暂停流程'}</button>`:''}${compact?'':`<button class="button small" data-flow="visit" data-id="${esc(f.id)}">进入当前步骤</button>`}${!terminal.has(f.status)?`<button class="button subtle small" data-flow="cancel" data-id="${esc(f.id)}">停止流程</button>`:''}</div>`;
+  return `<div class="studio-flow-actions"><button class="button small" data-flow="visit" data-id="${esc(f.id)}">查看制作窗口</button></div>`;
  }
  function flowDetail(f){
   if(!f)return '<div class="studio-flow-empty"><strong>选好素材后，一次启动整套制作</strong><p>软件会按所选步骤自动交接成品。这里逐项显示完成情况、当前任务和需要你补充的内容。</p></div>';
@@ -73,21 +72,60 @@
   if(pid&&typeof jyEvidenceProject!=='undefined')jyEvidenceProject=pid;
   return before!==[focusId,typeof monitorId!=='undefined'?monitorId:'',typeof jianyingJob!=='undefined'?jianyingJob:'',typeof jyEvidenceProject!=='undefined'?jyEvidenceProject:''].join('|');
  }
- function go(f,force=false){
-  if(!f)return;const destination=route(f),sequence=Number(f.sequence??f.routeVersion??0),old=ui.seen.get(f.id);ui.seen.set(f.id,sequence);
-  if(!force&&(!ui.following||old===sequence))return;
-  const changed=bindContext(f);if(!pages.some(p=>p[0]===destination))return;
-  const hash='#'+destination;if(location.hash!==hash){ui.expectedHash=hash;location.hash=hash;}else if(force||changed){const y=window.scrollY;current=destination;renderPage();if(!force)window.scrollTo(0,y);}
+ function shownStage(f){return stages(f).find(x=>x.key===ui.viewStage)||stage(f);}
+ function ensureWindow(){
+  let dialog=$('#studio-run-dialog');if(dialog)return dialog;
+  dialog=document.createElement('dialog');dialog.id='studio-run-dialog';dialog.setAttribute('aria-labelledby','studio-run-title');dialog.setAttribute('aria-describedby','studio-run-summary');
+  dialog.innerHTML='<div class="studio-run-shell"><header id="studio-run-header"></header><div class="studio-run-body"><aside class="studio-run-sidebar"><h3>制作步骤</h3><nav id="studio-run-stages" aria-label="本次制作步骤"></nav><p class="studio-run-sidebar-note">每步完成后自动进入下一步，成品和记录留在本机。</p></aside><section id="studio-run-panel" tabindex="-1" aria-label="当前模块"></section></div><footer id="studio-run-footer"></footer><div class="studio-run-announcement" role="status" aria-live="polite"></div></div>';
+  document.body.append(dialog);
+  dialog.addEventListener('close',()=>{document.body.classList.remove('studio-run-open');window.StudioFlowPanels?.closed?.();if(ui.returnFocus?.isConnected)ui.returnFocus.focus({preventScroll:true});strip();});
+  dialog.addEventListener('cancel',e=>{e.preventDefault();dialog.close();});
+  return dialog;
  }
+ function updateWindow(updatePanel=true){
+  const dialog=$('#studio-run-dialog'),f=active();if(!dialog?.open||!f)return;
+  const actual=stage(f),shown=shownStage(f),ids=f.projectIds||[],raw=f.sourceVideoPaths||{},count=Array.isArray(raw)?raw.length:Object.values(raw).flat().length,names=ids.map(id=>state.projects.find(p=>p.id===id)?.name||f.projectNames?.[id]||id).join('、'),past=shown.key!==actual.key;
+  const header=`<div><div class="studio-run-title-row"><h2 id="studio-run-title">连续制作 · ${esc(shown.label||'当前步骤')}</h2><span class="tag ${f.status==='completed'?'green':f.status==='failed'?'red':'gray'}">${esc(labels[f.status]||f.status)}</span></div><p id="studio-run-summary">${esc(names)}${count?' · '+count+' 集':''}</p></div><button type="button" class="button small" data-flow="window-close" aria-label="收起制作窗口，任务继续在后台运行">${terminal.has(f.status)?'关闭窗口':'后台运行'}</button>`;
+  setHTML($('#studio-run-header'),header,JSON.stringify([f.id,f.status,names,count,shown.key,shown.label]));
+  const enabled=stages(f).filter(x=>x.status!=='skipped'),skipped=stages(f).length-enabled.length;
+  const navigation=enabled.map((x,i)=>{const viewing=x.key===shown.key,now=x.key===actual.key,available=x.status!=='queued';return `<button type="button" class="studio-run-stage ${viewing?'viewing':''} ${x.status==='completed'?'done':''}" data-flow="window-stage" data-stage="${esc(x.key)}" ${available?'':'disabled'} ${viewing?'aria-current="step"':''}><span class="studio-run-stage-number">${x.status==='completed'?icon('check'):i+1}</span><span><strong>${esc(x.label||x.key)}</strong><small>${now&&!terminal.has(f.status)?'当前步骤':esc(labels[x.status]||x.status)}</small></span></button>`;}).join('')+(f.status==='completed'?'<button type="button" class="studio-run-stage '+(shown.key==='completed'?'viewing':'')+'" data-flow="window-stage" data-stage="completed"><span class="studio-run-stage-number">'+icon('check')+'</span><span><strong>制作结果</strong><small>所选步骤已完成</small></span></button>':'')+(skipped?`<p class="studio-run-skipped">本次跳过 ${skipped} 个可选步骤</p>`:'');
+  setHTML($('#studio-run-stages'),navigation,JSON.stringify([f.id,shown.key,actual.key,enabled.map(x=>[x.key,x.status]),f.status,skipped]));
+  const panel=$('#studio-run-panel'),key=f.id+':'+shown.key;
+  if(ui.panelKey!==key){const editing=document.activeElement?.matches('input,textarea,select,[contenteditable=true]');window.StudioFlowPanels?.unmount?.();panel.innerHTML=window.StudioFlowPanels?.render?.(f,shown)||`<div class="studio-run-fallback"><h2>${esc(shown.label||'当前步骤')}</h2><p>${esc(shown.message||f.message||'正在准备模块')}</p></div>`;ui.panelKey=key;panel.dataset.stage=shown.key;panel.setAttribute('aria-label',shown.label||'当前模块');panel.scrollTop=0;if(!editing)panel.focus({preventScroll:true});}
+  if(updatePanel&&!ui.panelUpdating&&window.StudioFlowPanels?.update){ui.panelUpdating=true;Promise.resolve(window.StudioFlowPanels.update(f,shown)).catch(error=>{ui.error=error.message;}).finally(()=>{ui.panelUpdating=false;});}
+  const waiting=['waiting_action','waiting_confirmation','failed','interrupted','paused'].includes(f.status),currentLabel=actual.key==='review'?'我已检查成片，继续':f.status==='paused'?'恢复流程':f.status==='failed'?'重试未完成步骤':'检查并继续';
+  const custom=!past&&!terminal.has(f.status)&&!['paused','failed','interrupted'].includes(f.status)?window.StudioFlowPanels?.primary?.(f,shown):null;
+  let actions;
+  if(past)actions='<button class="button primary" data-flow="window-current">回到当前步骤</button>';
+  else if(f.status==='completed')actions='<button class="button" data-flow="view-output">查看成品</button><button class="button primary" data-flow="window-close">完成，返回工作台</button>';
+  else if(f.status==='cancelled')actions='<button class="button primary" data-flow="window-close">返回工作台</button>';
+  else if(custom)actions=`<button class="button subtle" data-flow="cancel" data-id="${esc(f.id)}">停止流程</button><button class="button primary" data-flow="window-primary" ${custom.disabled?'disabled':''}>${esc(custom.label||'继续')}</button>`;
+  else actions=`<button class="button subtle" data-flow="cancel" data-id="${esc(f.id)}">停止流程</button>${waiting?`<button class="button primary" data-flow="${actual.key==='review'?'review-confirm':'continue'}" data-id="${esc(f.id)}">${currentLabel}</button>`:`<button class="button" data-flow="pause" data-id="${esc(f.id)}">暂停流程</button><button class="button primary" disabled>正在处理…</button>`}`;
+  const footer=`<div class="studio-run-footer-message"><strong>${past?'正在查看：'+esc(shown.label||shown.key):esc(actual.label||'连续制作')}</strong><p>${past?'查看已完成步骤不会重新执行任务。':esc(ui.error||f.message||actual.message||'等待阶段反馈')}</p></div><div class="studio-run-footer-actions">${actions}</div>`;
+  setHTML($('#studio-run-footer'),footer,JSON.stringify([f.id,f.status,shown.key,actual.key,f.message,actual.message,ui.error,ui.busy,custom]));
+  if(ui.busy)$$('#studio-run-footer [data-flow]').forEach(b=>b.disabled=true);
+  const announcement=$('.studio-run-announcement',dialog),announcementKey=f.id+':'+actual.key+':'+f.status;if(announcement.dataset.signature!==announcementKey){announcement.dataset.signature=announcementKey;announcement.textContent=(actual.label||'制作流程')+'，'+(labels[f.status]||f.status);}
+ }
+ function showWindow(key=''){
+  const f=active();if(!f)return;bindContext(f);ui.viewStage=key&&stages(f).some(x=>x.key===key)?key:'';ui.following=!ui.viewStage;ui.returnFocus=document.activeElement;
+  const dialog=ensureWindow();if(!dialog.open)dialog.showModal();document.body.classList.add('studio-run-open');updateWindow();
+ }
+ function go(f,force=false){
+  if(!f)return;const sequence=Number(f.sequence??f.routeVersion??0),old=ui.seen.get(f.id);ui.seen.set(f.id,sequence);
+  if(force){showWindow();return;}
+  if(ui.following&&old!==sequence){const editing=document.activeElement?.matches('input,textarea,select,[contenteditable=true]')&&$('#studio-run-panel')?.contains(document.activeElement);if(editing&&$('#studio-run-panel').dataset.stage!==stage(f).key){ui.viewStage=$('#studio-run-panel').dataset.stage;ui.following=false;}else ui.viewStage='';bindContext(f);}updateWindow();
+ }
+ window.StudioFlowWindow={getFlow:active,getStage:()=>shownStage(active()),getCurrentStage:()=>stage(active()),refresh:()=>refresh(false),show:showWindow,isOpen:()=>!!$('#studio-run-dialog')?.open};
+ window.addEventListener('studio-flow-panel-change',()=>updateWindow(false));
  function strip(){
   let el=$('#studio-flow-strip');if(!el){el=document.createElement('section');el.id='studio-flow-strip';el.className='studio-flow-strip';el.setAttribute('aria-label','连续流程状态');$('.topbar')?.after(el);}
   const f=active();el.hidden=!f;if(!f)return;
   const s=stage(f),signature=JSON.stringify([f.id,f.status,f.currentStage,f.message,s.message,s.status,ui.following]),done=f.status==='completed',completed=stages(f).filter(x=>x.status==='completed').length,skipped=stages(f).filter(x=>x.status==='skipped').length;
-  const html=`<div class="studio-strip-state"><span class="studio-strip-dot ${terminal.has(f.status)?'done':''}"></span><div role="status" aria-live="polite"><strong>${done?'本次流程已完成':esc(s.label||'连续制作')+' · '+esc(labels[f.status]||f.status)}</strong><p>${done?`已完成 ${completed} 步${skipped?` · 本次跳过 ${skipped} 步`:''}`:esc(f.message||s.message||'正在按流程交接')}</p></div></div><div class="studio-strip-actions"><a class="button small" href="#studio">整套进度</a>${done?'':`<button class="button small" data-flow="follow" aria-pressed="${ui.following}">${ui.following?'暂停页面跟随':'继续跟随当前步骤'}</button>`}${controls(f,true)}</div>`;
+  const html=`<div class="studio-strip-state"><span class="studio-strip-dot ${terminal.has(f.status)?'done':''}"></span><div role="status" aria-live="polite"><strong>${done?'本次流程已完成':esc(s.label||'连续制作')+' · '+esc(labels[f.status]||f.status)}</strong><p>${done?`已完成 ${completed} 步${skipped?` · 本次跳过 ${skipped} 步`:''}`:esc(f.message||s.message||'正在按流程交接')}</p></div></div><div class="studio-strip-actions"><a class="button small" href="#studio">工作台</a><button class="button small" data-flow="visit">${done?'查看制作结果':'查看制作窗口'}</button></div>`;
   setHTML(el,html,signature);el.dataset.flowId=f.id;el.dataset.following=String(ui.following);
  }
  function update(){
-  strip();if(current!=='studio')return;
+  strip();updateWindow();if(current!=='studio')return;
   const f=active();setHTML($('#studio-flow-detail'),flowDetail(f),JSON.stringify(f));
   const inventory=JSON.stringify(state.projects.map(p=>[p.id,p.name,p.videos.map(v=>[v.path,v.name,v.duration])]));setHTML($('#studio-projects'),projectListHTML(),inventory);filterProjects();
   const history=$('#studio-flow-history'),rows=ui.flows.filter(x=>x.id!==f?.id).slice().reverse();
@@ -103,9 +141,9 @@
   baseTaskbar();const b=$('#start-pipeline');if(current!=='studio'){delete b.dataset.flow;if(ui.flows.some(f=>f.id===b.dataset.id))delete b.dataset.id;return;}
   delete b.dataset.action;delete b.dataset.jianying;delete b.dataset.track;
   const f=active(),s=stage(f),ongoing=f&&!terminal.has(f.status),finished=f?.status==='completed'&&!ui.preparingNext,waiting=ongoing&&['waiting_action','waiting_confirmation','failed','interrupted','paused'].includes(f.status);
-  b.dataset.flow=finished?'prepare-next':ongoing?(waiting?(s.key==='review'?'review-confirm':'continue'):'visit'):'start';
+  b.dataset.flow=finished?'prepare-next':ongoing?'visit':'start';
   if(ongoing)b.dataset.id=f.id;else delete b.dataset.id;
-  b.innerHTML=icon(finished?'plus':ongoing?'layers':'play')+(finished?'准备下一批':ongoing?(waiting?(s.key==='review'?'我已检查成片，继续':f.status==='paused'?'恢复流程':'检查并继续'):'进入当前步骤'):'开始整套流程');
+  b.innerHTML=icon(finished?'plus':ongoing?'layers':'play')+(finished?'准备下一批':ongoing?'查看制作窗口':'开始整套流程');
   b.disabled=ui.busy||(!finished&&!ongoing&&!selectedVideos().length);
   $('#task-title').textContent=finished?'本次流程已完成':ongoing?s.label||'连续制作流程':'连续制作流程';
   $('#task-detail').textContent=finished?'查看成品，或重新选择下一批素材':ongoing?f.message||s.message||'自动交接下一步':`已选 ${selectedProjects().length} 部 · ${selectedVideos().length} 集，自动交接下一步`;
@@ -113,7 +151,7 @@
 
  const baseRefresh=refresh;refresh=async function(...args){const result=await baseRefresh(...args);await load();return result;};
  function filterProjects(){for(const row of $$('[data-flow-project-row]'))row.hidden=!row.dataset.search.includes(ui.query.toLowerCase());}
- window.addEventListener('hashchange',()=>{if(ui.expectedHash===location.hash){ui.expectedHash='';return;}ui.expectedHash='';ui.following=false;strip();});
+ window.addEventListener('hashchange',()=>{strip();});
  document.addEventListener('input',e=>{if(e.target.id==='studio-flow-query'){ui.query=e.target.value;filterProjects();}});
  document.addEventListener('change',e=>{
   const el=e.target;if(el.dataset.flowProject){const p=state.projects.find(x=>x.id===el.dataset.flowProject);if(p){if(el.checked){ui.projectIds.add(p.id);p.videos.forEach(v=>ui.paths.add(v.path));}else{ui.projectIds.delete(p.id);p.videos.forEach(v=>ui.paths.delete(v.path));}$$('[data-flow-video]',el.closest('.studio-project')).forEach(b=>b.checked=el.checked);}}
@@ -128,14 +166,18 @@
    if(b.tagName==='SUMMARY'&&ui.preparingNext)return;e.preventDefault();ui.preparingNext=true;ui.projectIds.clear();ui.paths.clear();$$('[data-flow-video]').forEach(x=>x.checked=false);updateSelection();
    const next=$('.studio-new-batch');if(next){next.open=true;next.scrollIntoView({block:'start',behavior:'auto'});}return;
   }
-  if(action==='view-output'){ui.following=false;bindContext(f);if(location.hash!=='#progress'){ui.expectedHash='#progress';location.hash='#progress';}else{current='progress';renderPage();}strip();return;}
-  if(action==='follow'){ui.following=!ui.following;if(ui.following)go(f,true);strip();return;}
+  if(action==='window-close'){$('#studio-run-dialog')?.close();return;}
+  if(action==='window-stage'){ui.viewStage=b.dataset.stage==='completed'?'':b.dataset.stage;ui.following=ui.viewStage===stage(f).key;updateWindow();return;}
+  if(action==='window-current'){ui.viewStage='';ui.following=true;updateWindow();return;}
+  if(action==='view-output'){showWindow('production');return;}
   if(action==='visit'){ui.following=true;go(f,true);strip();return;}
   if(action==='clear-selection'||action==='select-all'){ui.projectIds.clear();ui.paths.clear();if(action==='select-all')for(const p of state.projects){ui.projectIds.add(p.id);p.videos.forEach(v=>ui.paths.add(v.path));}$$('[data-flow-video]').forEach(x=>x.checked=ui.paths.has(x.dataset.flowVideo));updateSelection();return;}
   if(ui.busy)return;ui.busy=true;ui.error='';b.disabled=true;updateSelection();
   try{
    let result;
-   if(action==='start'){
+   if(action==='window-primary'){
+    await window.StudioFlowPanels?.runPrimary?.(f,shownStage(f));await refresh(false);updateWindow();return;
+   }else if(action==='start'){
     const projects=selectedProjects(),videos=selectedVideos();if(!videos.length)throw Error('请先选择素材');if(ui.options.withPublish&&!ui.options.accountId)throw Error('请选择本次发布账号，或关闭进入发布后台');
     const sourceVideoPaths=Object.fromEntries(projects.map(p=>[p.id,p.videos.filter(v=>ui.paths.has(v.path)).map(v=>v.path)]));
     selected=new Set(projects.map(p=>p.id));result=await api('studio-flows/start',{projectIds:projects.map(p=>p.id),sourceVideoPaths,options:{...ui.options}});
