@@ -191,7 +191,7 @@ def _official_proof_images(project, selected, problems, warnings):
     packet manifest or a client's selected filename. This validates provenance
     and current image bytes, not copyright or platform acceptance.
     """
-    kinds = {'剪映工程截图': 'jianying', '即梦工程截图': 'jimeng'}
+    kinds = {'剪映工程截图': 'jianying'}
     artifacts = [a for a in project.get('artifacts', []) if isinstance(a, dict)
                  and a.get('kind') in kinds and isinstance(a.get('path'), str)]
     automatic = selected is None
@@ -304,7 +304,7 @@ def inspect(project, config=None, overrides=None, probe=None):
     check('trialEpisodes', '试看集数', trial_ok, f'{trial} 集' if trial_ok else '请输入不超过总集数的正整数')
     check('totalCostYuan', '制作成本', bool(fields['totalCostYuan']), f'{fields["totalCostYuan"]:,.2f} 元' if fields['totalCostYuan'] else '请填写经核实的实际制作成本（元）')
     check('cover', '封面', bool(files['cover']), '已找到本地封面' if files['cover'] else '请选择封面图片', paths=[files['cover']['path']] if files['cover'] else [])
-    check('proofImages', '官方工程截图', bool(files['proofImages']), f'{len(files["proofImages"])} 张，已核对官方窗口来源、本人关联确认及图片哈希；平台适用性需另行核对' if files['proofImages'] else '未登记为已核验官方窗口截图，请从工程页采集剪映或即梦实际界面', paths=[a['path'] for a in files['proofImages']])
+    check('proofImages', '官方工程截图', bool(files['proofImages']), f'{len(files["proofImages"])} 张，已核对官方窗口来源、本人关联确认及图片哈希；平台适用性需另行核对' if files['proofImages'] else '未登记为已核验官方窗口截图，请从工程页采集剪映实际界面', paths=[a['path'] for a in files['proofImages']])
     check('costReports', '成本报告文档', bool(files['costReports']), f'{len(files["costReports"])} 份' if files['costReports'] else '请先生成或补充成本报告文档', paths=[a['path'] for a in files['costReports']])
     check('costImages', '成本报告图片', bool(files['costImages']), f'{len(files["costImages"])} 张' if files['costImages'] else '请补充实际成本报告或比例表图片；Word/CSV未自动当作图片', paths=[a['path'] for a in files['costImages']])
     storyboard_min = _positive(config.get('publishStoryboardMin', 4), 100, True) or 4

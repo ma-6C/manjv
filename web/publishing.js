@@ -5,7 +5,7 @@
  const model={tab:'drama',workspace:null,drafts:new Map(),dirty:new Set(),plans:new Map(),accountId:'',browser:null,notice:'',loading:false,polling:false,importRows:[],importSelected:new Set(),busy:false};
  const attachmentGroups=[
   ['coverPath','封面','image','cover','封面图片'],
-  ['proofImages','官方工程截图','images','proofImages','从剪映或即梦的实际工程窗口采集，并核对截图归属；手动导入的图片来源仍待核验'],
+  ['proofImages','官方工程截图','images','proofImages','从剪映的实际工程窗口采集，并核对截图归属；手动导入的图片来源仍待核验'],
   ['storyboardImages','分镜证明图片','images','storyboardImages','按本地检查方案准备至少 4 张，平台要求以当前后台为准'],
   ['costImages','成本报告图片','images','costImages','将实际制作成本报告保存为图片后选择'],
   ['copyrightImages','授权证明图片','images','copyrightImages','选择与本剧对应的真实授权资料'],

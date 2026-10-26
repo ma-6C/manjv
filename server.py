@@ -1108,7 +1108,7 @@ def records(p,cfg,job):
         'kind':'processing_log','officialScreenshot':False,
         'inputs':[{'name':v['name'],'sha256':hashes[v['path']]} for v in p['videos']],'sourceFrames':frames,
         'outputs':[{'file':a['path'],'sha256':sha256(a['path'])} for a in final_videos(p)],
-        'note':'仅记录实际文件与处理结果，不绘制工程界面。官方工程截图请在剪映或即梦实际项目中采集。'},ensure_ascii=False,indent=2),'utf-8')
+        'note':'仅记录实际文件与处理结果，不绘制工程界面。官方工程截图请在剪映实际项目中采集。'},ensure_ascii=False,indent=2),'utf-8')
     register(p,manifest,'制作记录',job)
 
 def costs(p,cfg,job):
@@ -1955,9 +1955,7 @@ class Handler(BaseHTTPRequestHandler):
                 association=evidence_association(body)
                 return self.reply(value=evidence_manager().import_images(association['projectId'],body,association))
             if path=='/api/project-evidence/open':
-                if body.get('platform')!='jimeng':raise ValueError('请通过剪映工程入口打开本机编辑器')
-                opened=webbrowser.open('https://jimeng.jianying.com/')
-                return self.reply(value={'opened':bool(opened),'note':'请本人打开即梦实际项目或智能画布，再从工程页采集；没有执行图片生成或扣费'})
+                raise ValueError('网页工程入口已停用，请通过剪映工程入口打开本机编辑器')
             if path=='/api/publish/inspect':return self.reply(value=publish_workspace().inspect(body.get('projectId',''),body.get('overrides')))
             if path=='/api/publish/settings':return self.reply(value=publish_workspace().settings(body.get('projectId',''),body.get('overrides',{})))
             if path=='/api/publish/discover':return self.reply(value=publish_workspace().discover(body.get('folder','')))

@@ -59,7 +59,7 @@
    await readOnce('evidence:'+pid,async()=>{cache.evidence.set(pid,await api('project-evidence/list?projectId='+encodeURIComponent(pid)));});
    if(root()?.querySelector('.sp-stage')?.dataset.projectId!==pid||root()?.querySelector('.sp-stage')?.dataset.stageKey!==s.key)return;
    const e=cache.evidence.get(pid)||{};put('#sp-evidence-tasks',(e.tasks||[]).slice(-2).map(t=>`<p class="${t.status==='failed'?'sp-error':'sp-muted'}">${esc(t.message||status(t.status))}</p>`).join(''));
-   const expected=new Set(draftRows(f).map(r=>r.jobId));put('#sp-evidence-items',(e.items||[]).filter(i=>expected.has(i.projectAssociation?.jobId)).map(i=>`<a href="${esc(media(i.path))}" target="_blank" rel="noreferrer"><img alt="本次工程实际窗口截图" loading="lazy" src="${esc(media(i.path))}"><span>${i.officialEvidence?.appVerified?'官方窗口来源已核验':'来源待核对'}</span></a>`).join(''));
+   const expected=new Set(draftRows(f).map(r=>r.jobId));put('#sp-evidence-items',(e.items||[]).filter(i=>i.platform==='jianying'&&expected.has(i.projectAssociation?.jobId)).map(i=>`<a href="${esc(media(i.path))}" target="_blank" rel="noreferrer"><img alt="本次工程实际窗口截图" loading="lazy" src="${esc(media(i.path))}"><span>${i.officialEvidence?.appVerified?'官方窗口来源已核验':'来源待核对'}</span></a>`).join(''));
   }
   if(['materials','export','publish'].includes(s.key)){
    await readOnce('workspace',async()=>{cache.workspace=await api('publish/workspace');if(!cache.dirty.has(pid)&&!root()?.querySelector('#sp-material-form')?.dataset.loaded)cache.drafts.delete(pid);});

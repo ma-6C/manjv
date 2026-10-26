@@ -4,8 +4,6 @@ Native window acceptance is deliberately separate from these backend fixtures.
 """
 from pathlib import Path
 import copy,json,os,sys,tempfile,threading,time
-from contextlib import nullcontext
-from types import SimpleNamespace
 from unittest.mock import patch
 ROOT=Path(__file__).resolve().parent;BASE=Path(tempfile.mkdtemp(prefix='official-project-core-',dir=ROOT/'tmp'))
 os.environ['MANJU_DATA']=str(BASE/'data');os.environ['FFMPEG_EXE']=str(next((ROOT/'vendor/imageio_ffmpeg/binaries').glob('*.exe')))
@@ -19,32 +17,23 @@ def rejects(fn):
     except (ValueError,PermissionError):return True
     return False
 class ControlledCapture:
-    def windows(self,platform):return [{'id':'fixture-window','title':'CONTROLLED TEST ONLY','pid':123,'processPath':'fixture','platform':platform}]
+    def __init__(self):self.window_calls=0
+    def windows(self,platform):
+        self.window_calls+=1
+        return [{'id':'fixture-window','title':'CONTROLLED TEST ONLY','pid':123,'processPath':'fixture','platform':platform}]
     def foreground(self,window):return True
     def capture(self,window,platform,path):
         Image.new('RGB',(480,320),'#e8dcf9').save(path)
         return {'id':window,'pid':123,'processPath':'fixture','appVerified':True,'unmodified':True,'fixture':True}
 try:
-    class Control:
-        def __init__(self,kind='PaneControl',cls='',value='',focused=False,children=()):
-            self.ControlTypeName,self.ClassName,self.value,self.HasKeyboardFocus,self.children=kind,cls,value,focused,list(children)
-        def GetChildren(self):return self.children
-        def GetValuePattern(self):return SimpleNamespace(Value=self.value)
-    address=Control('EditControl','Chrome_OmniboxView','https://jimeng.jianying.com/project/example',False)
-    document=Control('DocumentControl',value='https://example.org/')
-    root_control=Control(children=[address,document])
-    auto=SimpleNamespace(UIAutomationInitializerInThread=nullcontext,ControlFromHandle=lambda h:root_control)
-    with patch.dict(sys.modules,{'uiautomation':auto}):
-        reader=pe.WindowsCapture()
-        check('只输入未导航的即梦网址不能当实际来源',reader._browser_url(1)=='')
-        document.value=address.value;address.HasKeyboardFocus=True
-        check('地址栏正在编辑时拒绝采集',reader._browser_url(1)=='')
-        address.HasKeyboardFocus=False
-        check('受控浏览器原生地址与文档URL一致才通过',reader._browser_url(1)==address.value)
-        address.value=document.value='https://jimeng.jianying.com:8443/project/example'
-        check('即梦来源拒绝非官方端口',reader._browser_url(1)=='')
-        address.value=document.value='https://name:pass@jimeng.jianying.com/project/example'
-        check('即梦来源拒绝嵌入登录凭据的地址',reader._browser_url(1)=='')
+    check('截图平台仅保留剪映',pe.PLATFORMS=={'jianying':'剪映'})
+    # An uninitialized reader has no native handles: rejecting first proves
+    # unsupported platforms cannot reach OS enumeration or capture methods.
+    reader=object.__new__(pe.WindowsCapture)
+    check('旧即梦窗口描述在访问原生控件前拒绝',rejects(lambda:reader.describe(1,'jimeng')))
+    check('旧即梦窗口枚举在调用系统前拒绝',rejects(lambda:reader.windows('jimeng')))
+    check('旧即梦截图在读取前台窗口前拒绝',rejects(lambda:reader.capture(1,'jimeng',BASE/'not-created.png')))
+    check('浏览器程序不再进入工程签名核验',rejects(lambda:reader._signature(Path('chrome.exe'))))
     folder=BASE/'素材';folder.mkdir();video=folder/'官方工程接入样片.mp4'
     original=Path('D:/weixin_wenjian/xwechat_files/wxid_qet5grsgoecp22_d214/msg/video/2026-10/7ecdbee6fa3a89ad314f90ed019be92c.mp4')
     if original.is_file():s.ff(['-i',str(original),'-t','6','-vf','scale=960:-2','-c:v','libx264','-preset','fast','-c:a','aac',str(video)])
@@ -68,6 +57,23 @@ try:
     def record(p,path,kind,evidence):
         entry={'path':str(path),'kind':kind,'officialEvidence':copy.deepcopy(evidence)};registered.append(entry)
     m=pe.Manager({},BASE/'evidence-fixture',threading.RLock(),lambda:None,record,backend=ControlledCapture())
+    check('旧平台采集请求不枚举窗口或创建任务',rejects(lambda:m.capture(pid,{'platform':'jimeng'},{}))
+          and m.backend.window_calls==0 and not m.list(pid)['tasks'] and not registered)
+    check('旧平台手动导入不创建目录或复制文件',rejects(lambda:m.import_images(pid,{'platform':'jimeng','paths':[str(old)],'note':'legacy source','userConfirmed':True},{}))
+          and not (m.data/'official-project-evidence').exists() and not registered)
+    check('内部登记也不能把旧平台写成剪映',rejects(lambda:m._record(pid,BASE/'missing.png','jimeng','window_capture','',{},{})) and not registered)
+    check('无效平台类型明确拒绝且没有后台副作用',all(rejects(lambda value=value:m.capture(pid,{'platform':value},{})) for value in (None,[],{},1))
+          and m.backend.window_calls==0)
+    legacy={'projectEvidence':{'items':[{'id':'legacy-item','projectId':pid,'platform':'jimeng','path':str(old)}],
+        'tasks':[{'id':'legacy-pending','projectId':pid,'platform':'jimeng','status':'capturing'},
+                 {'id':'legacy-complete','projectId':pid,'platform':'jimeng','status':'completed'}]}}
+    legacy_hash=pe.sha(old)
+    legacy_manager=pe.Manager(legacy,BASE/'legacy-history',threading.RLock(),lambda:None,record,backend=ControlledCapture())
+    history=legacy_manager.list(pid)
+    check('历史截图与文件原样保留且不改标剪映',history['items'][0]['platform']=='jimeng' and pe.sha(old)==legacy_hash)
+    check('旧平台未完成任务停用而已完成历史保留',history['tasks'][0]['status']=='failed' and '来源已停用' in history['tasks'][0]['message']
+          and history['tasks'][1]['status']=='completed' and legacy_manager.backend.window_calls==0)
+    legacy_manager.shutdown()
     check('枚举窗口不生成图片',m.capture(pid,{'platform':'jianying'},{}).get('windows') and not registered)
     check('必须本人确认窗口工程内容',rejects(lambda:m.capture(pid,{'platform':'jianying','windowId':'fixture-window'},{})))
     started=m.capture(pid,{'platform':'jianying','windowId':'fixture-window','userConfirmed':True},{'projectId':pid})
