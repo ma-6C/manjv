@@ -62,9 +62,28 @@ try:
     check('completed_flow_poll_never_creates_another_job',len(s.JOBS)==before)
 
     s.STATE['config']['segmentSeconds']=1
-    with patch('jianying_automation.open_registered_project',return_value={'status':'waiting_action','projectOpened':False,'message':'controlled test: native app not opened'}):
+    with patch('jianying_automation.open_registered_project',return_value={'status':'waiting_action','projectOpened':False,'message':'controlled test: native app not opened'}) as native:
         flow=manager.start({'projectIds':[pid],'sourceVideoPaths':{pid:[paths[1],paths[0]]},'options':{'withJianying':True,'withEvidence':True,'withExport':False,'withPublish':False}})
-        fid=flow['id'];evidence=wait_flow(manager,fid,'evidence')
+        fid=flow['id'];handoff=wait_flow(manager,fid,'editor_import')
+        end=time.monotonic()+10
+        while time.monotonic()<end:
+            manager.tick();handoff=next(f for f in manager.public()['flows'] if f['id']==fid)
+            if handoff['status']=='waiting_action':break
+            time.sleep(.05)
+        check('copied_draft_waits_for_actual_editor_project',handoff['currentStage']=='editor_import' and handoff['status']=='waiting_action'
+              and handoff['stages'][3]['result']['editor']['projectOpened'] is False)
+        jy=s.JOBS[handoff['stages'][2]['ref']['ids'][0]]
+        before_jobs=len(s.JOBS);before_folders=len(list((BASE/'drafts').iterdir()))
+        imported_paths=[r['editorImport']['directory'] for r in jy['jianyingResults']]
+        for _ in range(4):manager.tick()
+        check('waiting_editor_poll_never_reopens_or_rebuilds',native.call_count==1 and len(s.JOBS)==before_jobs)
+        native.return_value={'status':'completed','projectOpened':True,'timelineVerified':True,'projectTitleVerified':True,
+                             'editorValidated':False,'message':'controlled test: exact editor title and timeline observed'}
+        manager.control(fid,'continue')
+        evidence=wait_flow(manager,fid,'evidence')
+        check('deliberate_editor_recheck_reuses_jobs_and_imports',native.call_count==2 and len(s.JOBS)==before_jobs
+              and len(list((BASE/'drafts').iterdir()))==before_folders
+              and [r['editorImport']['directory'] for r in jy['jianyingResults']]==imported_paths)
         end=time.monotonic()+10
         while time.monotonic()<end:
             manager.tick();evidence=next(f for f in manager.public()['flows'] if f['id']==fid)

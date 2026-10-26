@@ -93,7 +93,7 @@
   const panel=$('#studio-run-panel'),key=f.id+':'+shown.key;
   if(ui.panelKey!==key){const editing=document.activeElement?.matches('input,textarea,select,[contenteditable=true]');window.StudioFlowPanels?.unmount?.();panel.innerHTML=window.StudioFlowPanels?.render?.(f,shown)||`<div class="studio-run-fallback"><h2>${esc(shown.label||'当前步骤')}</h2><p>${esc(shown.message||f.message||'正在准备模块')}</p></div>`;ui.panelKey=key;panel.dataset.stage=shown.key;panel.setAttribute('aria-label',shown.label||'当前模块');panel.scrollTop=0;if(!editing)panel.focus({preventScroll:true});}
   if(updatePanel&&!ui.panelUpdating&&window.StudioFlowPanels?.update){ui.panelUpdating=true;Promise.resolve(window.StudioFlowPanels.update(f,shown)).catch(error=>{ui.error=error.message;}).finally(()=>{ui.panelUpdating=false;});}
-  const waiting=['waiting_action','waiting_confirmation','failed','interrupted','paused'].includes(f.status),currentLabel=actual.key==='review'?'我已检查成片，继续':f.status==='paused'?'恢复流程':f.status==='failed'?'重试未完成步骤':'检查并继续';
+  const waiting=['waiting_action','waiting_confirmation','failed','interrupted','paused'].includes(f.status),currentLabel=actual.key==='review'?'我已检查成片，继续':f.status==='paused'?'恢复流程':actual.key==='editor_import'?'重新检测并继续':f.status==='failed'?'重试未完成步骤':'检查并继续';
   const custom=!past&&!terminal.has(f.status)&&!['paused','failed','interrupted'].includes(f.status)?window.StudioFlowPanels?.primary?.(f,shown):null;
   let actions;
   if(past)actions='<button class="button primary" data-flow="window-current">回到当前步骤</button>';

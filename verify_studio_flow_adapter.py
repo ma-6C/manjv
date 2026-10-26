@@ -7,6 +7,7 @@ import tempfile
 import threading
 import time
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import publish_workflow
 from studio_flow_adapter import Adapter
@@ -83,7 +84,94 @@ def task(workspace, suffix, *, state=None, status='completed', age=0, pid='p1'):
     return row
 
 
+def editor_fixture():
+    adapter, _, flow, _ = fixture()
+    row = {'projectId': 'p1', 'directory': str(BASE / 'controlled-draft'), 'name': 'source-draft'}
+    adapter.s.JOBS['jy1'] = {'id': 'jy1', 'jianyingResults': [row]}
+    flow['jianyingOptions'] = {}
+    flow['status'] = 'running'
+    flow['stages'].append({'key': 'jianying', 'ref': {'ids': ['jy1']}})
+    adapter.s.STATE['studioFlows'] = {'flows': [flow]}
+    imported = {'directory': str(BASE / 'controlled-import'), 'name': 'actual-imported-draft',
+                'editorValidated': False}
+    stage = {'key': 'editor_import', 'operationId': 'f1:editor_import', 'status': 'running'}
+    return adapter, flow, stage, imported
+
+
+def wait_handoff(adapter, flow, stage):
+    deadline = time.monotonic() + 3
+    while adapter.threads and time.monotonic() < deadline:
+        time.sleep(.01)
+    if adapter.threads:
+        raise AssertionError('controlled editor worker did not finish')
+    return adapter.poll(flow, stage)
+
+
+def editor_checks():
+    adapter, flow, stage, imported = editor_fixture()
+    waiting = {'status': 'waiting_action', 'reason': 'editor_project', 'projectOpened': False,
+               'timelineVerified': False, 'projectTitleVerified': False,
+               'message': '请打开 actual-imported-draft 后重新检测'}
+    verified = {'status': 'completed', 'projectOpened': True, 'timelineVerified': True,
+                'projectTitleVerified': True, 'editorValidated': False,
+                'message': '已定位本次工程的真实时间线'}
+    with patch('jianying_projects.install_to_editor', return_value=imported) as install, \
+         patch('jianying_automation.open_registered_project', return_value=waiting) as native:
+        result = adapter.start(flow, stage, stage['operationId'])
+        stage['ref'] = result['ref']
+        result = wait_handoff(adapter, flow, stage)
+        check('草稿复制完成而工程未打开时停在交接步骤',
+              result['status'] == 'waiting_action' and result['reason'] == 'editor_project'
+              and result['result']['imports'][0]['name'] == imported['name']
+              and result['result']['editor']['projectOpened'] is False)
+        for _ in range(6):
+            adapter.poll(flow, stage)
+        check('等待时轮询只读交接记录，不重复调用原生动作或复制',
+              native.call_count == 1 and install.call_count == 1 and len(adapter.s.JOBS) == 1)
+        native.return_value = verified
+        result = adapter.resume(flow, stage, stage['operationId'])
+        stage['ref'] = result['ref']
+        result = wait_handoff(adapter, flow, stage)
+        check('本人打开后显式重检可以完成同一交接任务',
+              result['status'] == 'completed' and result['result']['editor']['projectOpened'] is True
+              and result['reason'] == '' and len(adapter.s.STATE['studioFlowTasks']) == 1
+              and adapter.s.STATE['studioFlowTasks'][0]['id'] == stage['operationId'])
+        check('重新检测复用已导入副本，不重编码不重生成不重拷贝',
+              native.call_count == 2 and install.call_count == 1 and len(adapter.s.JOBS) == 1
+              and native.call_args.args[0]['directory'] == imported['directory'])
+        for _ in range(4):
+            adapter.poll(flow, stage)
+        check('交接完成后轮询不重新启动原生操作', native.call_count == 2 and install.call_count == 1)
+
+    # A misleading completed status, a launch, or a timeline alone is not
+    # enough to finish this step without the exact project title as well.
+    for missing in ('projectOpened', 'timelineVerified', 'projectTitleVerified'):
+        adapter, flow, _, imported = editor_fixture()
+        with patch('jianying_projects.install_to_editor', return_value=imported), \
+             patch('jianying_automation.open_registered_project', return_value={**verified, missing: False, 'appLaunched': True}):
+            result = adapter._editor(flow)
+        check('缺少实际核验字段保持等待：'+missing,
+              result['status'] == 'waiting_action' and result['reason'] == 'editor_project')
+
+    adapter, flow, stage, imported = editor_fixture()
+    with patch('jianying_projects.install_to_editor', return_value=imported) as install, \
+         patch('jianying_automation.open_registered_project', side_effect=[RuntimeError('controlled native failure'), waiting, verified]) as native:
+        result = adapter.start(flow, stage, stage['operationId'])
+        stage['ref'] = result['ref']
+        result = wait_handoff(adapter, flow, stage)
+        check('原生打开失败保留已完成草稿副本',
+              result['status'] == 'failed' and adapter.s.JOBS['jy1']['jianyingResults'][0]['editorImport'] == imported)
+        for expected in ('waiting_action', 'completed'):
+            result = adapter.resume(flow, stage, stage['operationId'])
+            stage['ref'] = result['ref']
+            result = wait_handoff(adapter, flow, stage)
+            check('失败后恢复原交接并核对实际状态：'+expected, result['status'] == expected)
+        check('失败后多次显式恢复仍复用唯一交接和草稿副本',
+              len(adapter.s.STATE['studioFlowTasks']) == 1 and native.call_count == 3 and install.call_count == 1)
+
+
 def run():
+    editor_checks()
     adapter, workspace, flow, stage = fixture()
     first = adapter._browser(flow, stage, stage['operationId'])
     check('首次发布准备只打开官方后台，不直接填表', first['status'] == 'running' and [c[0] for c in workspace.calls] == ['open'])

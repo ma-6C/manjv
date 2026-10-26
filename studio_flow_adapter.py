@@ -112,7 +112,9 @@ class Adapter:
             if task is None:
                 task = {'id': operation, 'createdAt': time.time(), 'result': {}}
                 s.STATE['studioFlowTasks'].append(task)
-            task.update(status='running', message='正在交接到下一步');s.save()
+            task.update(status='running', reason='', message='正在交接到下一步')
+            task.pop('finishedAt', None)
+            s.save()
         def run():
             try:
                 value = work()
@@ -164,10 +166,16 @@ class Adapter:
         event=self.events.setdefault(flow['id'],threading.Event())
         opened = jianying_automation.open_registered_project(first, flow['jianyingOptions'], event)
         if event.is_set() or self.stop.is_set():raise InterruptedError('剪映交接已暂停，已导入的工程保留')
-        # Copy/import success is a complete software handoff; actual editor
-        # opening is reported separately and evidence remains its own gate.
-        return dict(status='completed', result={'imports': rows, 'editor': opened},
-                    message='工程已交接到剪映；'+opened.get('message', opened.get('note', '请在剪映核对实际工程')))
+        # A copied draft must not advance past the editor handoff until the
+        # exact project and its real timeline have actually been observed.
+        verified = (opened.get('status') == 'completed'
+                    and all(opened.get(key) is True for key in
+                            ('projectOpened', 'timelineVerified', 'projectTitleVerified')))
+        return dict(status='completed' if verified else 'waiting_action',
+                    reason='' if verified else opened.get('reason') or 'editor_project',
+                    result={'imports': rows, 'editor': opened, 'resumePending': False},
+                    message=('已核对剪映中的本次工程；' if verified else '工程已导入草稿库，等待打开核验；')
+                    +opened.get('message', opened.get('note', '请在剪映打开「'+first['name']+'」后重新检测并继续')))
 
     def _evidence(self, flow):
         self._outputs(flow)
@@ -379,7 +387,7 @@ class Adapter:
         if key=='editor_import':
             self.events.setdefault(flow['id'],threading.Event()).clear()
             task=next((t for t in self.s.STATE['studioFlowTasks'] if t['id']==operation),None)
-            if task and task['status']=='failed':
+            if task and task['status'] in ('failed', 'waiting_action'):
                 with self.s.LOCK:task['status']='interrupted';self.s.save()
             result=self._task(operation,lambda:self._editor(flow))
             result.setdefault('result',{})['resumePending']=True
