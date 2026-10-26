@@ -279,7 +279,7 @@ def _safe_draft_root(value):
         raise ValueError('请选择剪映的独立草稿目录，不能选择系统根目录')
     return root
 
-def install_to_editor(folder,opts=None):
+def install_to_editor(folder,opts=None,*,operation_id=None):
     """Stage a fresh copy in the editor draft root, without changing its index.
 
     The editor still has to discover and open this draft. A copy cannot be used
@@ -301,8 +301,18 @@ def install_to_editor(folder,opts=None):
     if shutil.disk_usage(root).free<required+64*1024**2:raise ValueError('剪映草稿磁盘空间不足')
     safe=re.sub(r'[<>:"/\\|?*\x00-\x1f]','_',index.get('name') or source.name).strip(' .')[:80] or '漫剧工程'
     with _IMPORT_LOCK:
-        name=safe+'_导入_'+time.strftime('%Y%m%d-%H%M%S')+'_'+uuid.uuid4().hex[:6]
-        target=root/name;target.mkdir()
+        if operation_id:
+            if not isinstance(operation_id,str) or not re.fullmatch(r'[a-zA-Z0-9_-]{1,100}',operation_id):raise ValueError('工程交接编号无效')
+            name=safe+'_流程_'+operation_id
+        else:name=safe+'_导入_'+time.strftime('%Y%m%d-%H%M%S')+'_'+uuid.uuid4().hex[:6]
+        target=root/name
+        if target.exists() and operation_id:
+            if (target/'未完成导入.txt').exists():raise ValueError('上次工程复制中断，请先核对并移走该未完成草稿：'+str(target))
+            saved,_=_open_index(target)
+            if saved.get('flowOperationId')!=operation_id or saved.get('importedFrom')!=str(source):raise ValueError('工程交接目录已被其他文件占用')
+            return {'directory':str(target),'name':name,'path':str(target/'draft_content.json'),'manifest':str(target/'manju_project.json'),
+                    'draftRoot':str(root),'editorValidated':False,'indexModified':False,'reused':True}
+        target.mkdir()
     marker=target/'未完成导入.txt';marker.write_text('素材尚未校验完成，请勿打开。','utf-8')
     for relative in files:
         src=source/relative;dst=target/relative
@@ -320,6 +330,7 @@ def install_to_editor(folder,opts=None):
     manifest=target/'manju_project.json';copied.update(name=name,draftSHA256=sha(content),
         editorValidated=False,editorImportedAt=time.time(),importedFrom=str(source),editorMetaSHA256=sha(meta_file),
         note='草稿已复制并重定位，尚未验证剪映实际打开；不是官方API导入回执。')
+    if operation_id:copied['flowOperationId']=operation_id
     manifest.write_text(json.dumps(copied,ensure_ascii=False,indent=2),'utf-8')
     check(target);marker.unlink()
     return {'directory':str(target),'name':name,'path':str(content),'manifest':str(manifest),

@@ -138,17 +138,21 @@ class Workspace:
         if not re.fullmatch(r'[a-zA-Z0-9_-]{1,80}',account['id']):raise ValueError('账号标识无效')
         return copy.deepcopy(account)
 
-    def _start(self,kind,pid,account_id,work):
+    def _start(self,kind,pid,account_id,work,*,operation_id=None,retry=False):
         if self._stop.is_set():raise ValueError('发布工作区正在关闭')
         with self.lock:
             if self._stop.is_set():raise ValueError('发布工作区正在关闭')
+            previous=next((t for t in self.value['tasks'] if operation_id and t.get('operationId')==operation_id),None)
+            if previous and not (retry and previous['status'] not in ('queued','running')):
+                return {'taskId':previous['id'],'status':previous['status'],'reused':True}
             active=[t for t in self.value['tasks'] if t['status'] in ('queued','running')]
             if any((account_id and t.get('accountId')==account_id) or (not account_id and t['kind']==kind and t.get('projectId')==pid) for t in active):
                 raise ValueError('已有相同发布操作正在进行，请等待当前操作完成')
-            task={'id':uuid.uuid4().hex[:16],'kind':kind,'projectId':pid,'accountId':account_id,
+            task={'id':uuid.uuid4().hex[:16],'kind':kind,'projectId':pid,'accountId':account_id,'operationId':operation_id,
                   'status':'queued','stage':'等待执行','createdAt':time.time(),'result':None,'error':''}
+            if previous:self.value['tasks'].remove(previous)
             self.value['tasks'].append(task)
-            self.value['tasks']=self.value['tasks'][-100:]
+            self.value['tasks']=[t for t in self.value['tasks'][:-100] if t.get('operationId')]+self.value['tasks'][-100:]
             self.save()
         def run():
             try:
@@ -172,7 +176,7 @@ class Workspace:
         thread.start()
         return {'taskId':task['id'],'status':'queued'}
 
-    def export(self,pid):
+    def export(self,pid,*,operation_id=None,retry=False):
         plan=self.inspect(pid)
         if not plan['ready']:raise ValueError('资料尚未齐全：'+'；'.join(plan['errors'][:4]))
         _,config=self.snapshot(pid)
@@ -188,9 +192,9 @@ class Workspace:
                     task.update(stage='正在复制并校验：'+name,completedBytes=done,totalBytes=total,
                                 percent=round(done/max(1,total)*100,1));self.save()
             return publish_materials.export_packet(plan,destination,cancel=self._stop.is_set,progress=progress)
-        return self._start('export',pid,'',work)
+        return self._start('export',pid,'',work,operation_id=operation_id,retry=retry)
 
-    def browser(self,account_id,action,pid=''):
+    def browser(self,account_id,action,pid='',*,operation_id=None,retry=False):
         if action not in ('open','check','assist','close'):raise ValueError('后台操作无效')
         account=self._account(account_id)
         plan=None
@@ -210,7 +214,7 @@ class Workspace:
                         self._browser=BrowserManager(self.data)
                 manager=self._browser
             return manager.command(account,action,{'plan':plan} if plan else {})
-        return self._start('browser_'+action,pid,account_id,work)
+        return self._start('browser_'+action,pid,account_id,work,operation_id=operation_id,retry=retry)
 
     def record(self,body):
         pid=body.get('projectId','');self.snapshot(pid)

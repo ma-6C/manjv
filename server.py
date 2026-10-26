@@ -47,6 +47,8 @@ import highlight_render
 import lama_local
 import publish_workflow
 import project_evidence
+import studio_flow
+import studio_flow_adapter
 DATA = runtime_paths.data_home()
 DATA.mkdir(parents=True, exist_ok=True)
 PUBLIC = ROOT / 'web'
@@ -58,6 +60,8 @@ QUEUE_STOP = threading.Event()
 SOURCE_MANAGER = None
 PUBLISH_WORKSPACE = None
 EVIDENCE_MANAGER = None
+STUDIO_FLOW_MANAGER = None
+STUDIO_FLOW_ADAPTER = None
 LOCAL_JOB_KINDS = {'pipeline','transcode','subtitle','preview','playback','rewrite','cover','coverAI','records','cost','highlight','package','hook','promotion_package','track_sheet','jianying_project'}
 SECRETS = {'apiKey': '', 'subtitleKey': ''}
 FFMPEG = os.environ.get('FFMPEG_EXE') or shutil.which('ffmpeg')
@@ -491,7 +495,14 @@ def jianying_request(body):
         request,videos=track_request(body)
     elif kind in ('final','subtitle'):
         if not isinstance(ids,list) or not ids or len(set(ids))!=len(ids):raise ValueError('请先选择剧集')
-        videos=[{'projectId':pid,**v,**probe(v['path'])} for pid in ids for v in hook_inputs(get_project(pid),kind)]
+        selected=body.get('videoPaths')
+        if selected is not None and (not isinstance(selected,dict) or set(selected)!=set(ids)):raise ValueError('工程选集与剧目不匹配')
+        videos=[]
+        for pid in ids:
+            available={v['path']:v for v in hook_inputs(get_project(pid),kind)}
+            paths=selected[pid] if selected is not None else list(available)
+            if not isinstance(paths,list) or not paths or len(paths)!=len(set(paths)) or any(path not in available for path in paths):raise ValueError('请选择属于当前成品版本的视频')
+            videos.extend({'projectId':pid,**available[path],**probe(path)} for path in paths)
         if not 1<=len(videos)<=30:raise ValueError('请选择1至30个已生成视频；可以将特定成品导入素材库后自由选集')
         request={}
     else:raise ValueError('工程输入版本无效')
@@ -1497,6 +1508,8 @@ def control_job(jid,action):
     return {'id':jid,'status':job['status']}
 
 def shutdown_jobs():
+    if STUDIO_FLOW_MANAGER is not None:STUDIO_FLOW_MANAGER.shutdown()
+    if STUDIO_FLOW_ADAPTER is not None:STUDIO_FLOW_ADAPTER.shutdown()
     QUEUE_STOP.set();QUEUE_WAKE.set()
     with LOCK:
         for job in JOBS.values():
@@ -1518,9 +1531,9 @@ def hook_inputs(p,kind):
     if kind=='subtitle':return [a for a in p['artifacts'] if a['kind'] in ('AI字幕处理','字幕处理') and Path(a['path']).is_file()]
     raise ValueError('请选择原片、去字幕结果或当前成片')
 
-def job_preflight(body):
+def job_preflight(body, *, config=None):
     """Validate selection and storage without queuing or contacting model providers."""
-    cfg=validate_config(copy.deepcopy(STATE['config']));kind=body.get('kind','pipeline')
+    cfg=validate_config(copy.deepcopy(config if config is not None else STATE['config']));kind=body.get('kind','pipeline')
     if 'aiSelection' in body:cfg['aiSelection']=copy.deepcopy(body['aiSelection']);connections.validate(cfg)
     if kind not in ('pipeline','transcode','subtitle','highlight'):raise ValueError('此制作类型不支持选集预检')
     ids=body.get('ids',[]);requested=body.get('sourceVideoPaths')
@@ -1571,8 +1584,12 @@ def job_preflight(body):
             'width':cfg['width'],'height':cfg['height'],'regroup':cfg['regroup'],'interfaces':interfaces,
             'workflowPlan':production_plan(kind,cfg,continuing)}
 
-def create_job(body):
+def create_job(body, *, config=None, flow_id=None, operation_id=None):
     licensing.require(DATA)
+    if operation_id:
+        with LOCK:
+            existing=next((j for j in JOBS.values() if j.get('flowId')==flow_id and j.get('operationId')==operation_id),None)
+            if existing:return {'id':existing['id'],'reused':True}
     kind=body.get('kind','pipeline')
     if kind=='track_sheet':raise ValueError('自绘工程图功能已移除，请改用剪映可编辑工程和官方窗口截图')
     if kind not in LOCAL_JOB_KINDS|{'login','upload'}:
@@ -1587,7 +1604,7 @@ def create_job(body):
         if kind=='login' and len(account_ids)!=1:raise ValueError('一次只能登录一个账号')
         if kind=='upload' and body.get('confirmUpload') is not True:raise ValueError('请在上传确认窗口核对材料、账号和模式')
     if len(ids)!=len(set(ids)):raise ValueError('任务中存在重复剧目')
-    cfg=validate_config(copy.deepcopy(STATE['config']))
+    cfg=validate_config(copy.deepcopy(config if config is not None else STATE['config']))
     if 'aiSelection' in body:
         cfg['aiSelection']=copy.deepcopy(body['aiSelection']);connections.validate(cfg)
     for pid in ids:get_project(pid)
@@ -1633,7 +1650,7 @@ def create_job(body):
         # option in the job so historical first-N tasks retain their own scope.
         if kind=='subtitle':options['subtitleAllSelected']=True
         if requested is not None or kind in ('pipeline','subtitle'):
-            preflight=job_preflight(body|{'sourceVideoPaths':fixed})
+            preflight=job_preflight(body|{'sourceVideoPaths':fixed},config=cfg)
             if not preflight['ok']:raise ValueError('；'.join(preflight['errors']))
     elif 'sourceVideoPaths' in body:raise ValueError('此制作类型不支持指定源视频集数')
     if kind=='highlight':highlight_render.validate(cfg,True)
@@ -1673,6 +1690,13 @@ def create_job(body):
             if seconds not in [5,10]:raise ValueError('试处理时长请选择5秒或10秒')
             options.update(start=start,seconds=min(seconds,video['duration']-start))
     with LOCK:
+        if operation_id:
+            existing=next((j for j in JOBS.values() if j.get('flowId')==flow_id and j.get('operationId')==operation_id),None)
+            if existing:return {'id':existing['id'],'reused':True}
+        if flow_id and kind in ('pipeline','transcode','subtitle','highlight') and any(j.get('flowId')!=flow_id and j['status'] in ('queued','running','pausing','paused','interrupted') and j['kind'] in ('pipeline','transcode','subtitle','highlight') and set(ids).intersection(j['ids']) for j in JOBS.values()):
+            raise ValueError('所选剧目已有制作任务，请先完成或停止原任务')
+        if kind in ('pipeline','transcode','subtitle','highlight') and any(f['id']!=flow_id and f['status'] not in ('completed','cancelled') and set(ids).intersection(f['projectIds']) for f in STATE.get('studioFlows',{}).get('flows',[])):
+            raise ValueError('所选剧目正在连续流程中，请在开始工作页恢复或停止流程')
         if kind in ['login','upload'] and any(j['status'] in ['queued','running','pausing'] for j in JOBS.values()):raise ValueError('请先完成制作队列，再核对登录或上传任务')
         if parent:
             existing=next((j for j in JOBS.values() if j.get('options',{}).get('continueFromJob')==parent['id'] and j['status']!='cancelled'),None)
@@ -1680,7 +1704,8 @@ def create_job(body):
         jid=uuid.uuid4().hex[:12]
         JOBS[jid]={'id':jid,'kind':kind,'ids':ids,'status':'queued','stage':'准备中','progress':0,'created':time.time(),
                    'accountIds':account_ids,'completedStages':[],'cancel':threading.Event(),'processes':set(),
-                   'config':cfg,'options':options,'sourceSnapshot':source_snapshot(ids,options.get('sourceVideoPaths')),'checkpoints':{},'attempts':1,'queueAt':time.time()}
+                   'config':cfg,'options':options,'sourceSnapshot':source_snapshot(ids,options.get('sourceVideoPaths')),'checkpoints':{},'attempts':1,'queueAt':time.time(),
+                   'flowId':flow_id,'operationId':operation_id}
         persist_jobs()
     ensure_runner()
     return {'id':jid}
@@ -1711,8 +1736,11 @@ def source_manager():
         return SOURCE_MANAGER
 
 def public_state():
+    studio_flows=flow_manager().public()
     with LOCK:
         result=copy.deepcopy(STATE)
+        result['studioFlows']=studio_flows
+        result.pop('studioFlowTasks',None)
         result['jobs']=[{**{k:v for k,v in j.items() if k not in ['cancel','processes','config','sourceSnapshot','checkpoints']},
                          'workflowPlan':production_plan(j['kind'],j['config'],bool(j.get('options',{}).get('continueFromJob'))),
                          'telemetry':telemetry.snapshot(j),'completedProjects':sum(k.endswith(':project-done') for k in j.get('checkpoints',{})),
@@ -1724,6 +1752,16 @@ def public_state():
         result['promotionSummary']=promotions.summary(STATE)
         result['promotionEntryTypes']=promotions.TYPES
         return result
+
+
+def flow_manager():
+    global STUDIO_FLOW_MANAGER,STUDIO_FLOW_ADAPTER
+    with LOCK:
+        if STUDIO_FLOW_MANAGER is None:
+            STUDIO_FLOW_ADAPTER=studio_flow_adapter.Adapter(sys.modules[__name__])
+            STUDIO_FLOW_MANAGER=studio_flow.Manager(STATE,LOCK,save,STUDIO_FLOW_ADAPTER)
+            STUDIO_FLOW_MANAGER.start_background(.75)
+        return STUDIO_FLOW_MANAGER
 
 
 def publish_workspace():
@@ -1843,6 +1881,9 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_header('Set-Cookie','manju_session='+session.cookie+'; HttpOnly; SameSite=Strict; Path=/')
                 self.send_header('Content-Length','0');self.end_headers();return
             self.session_check()
+            if url.path=='/api/studio-flows':
+                licensing.require(DATA)
+                return self.reply(value=flow_manager().public())
             if url.path=='/api/publish/workspace':
                 licensing.require(DATA)
                 return self.reply(value=publish_workspace().public())
@@ -1905,6 +1946,8 @@ class Handler(BaseHTTPRequestHandler):
             if not isinstance(body,dict):raise ValueError('请求必须为对象')
             if path=='/api/license/activate':return self.reply(value=licensing.activate(DATA,body.get('token','')))
             licensing.require(DATA)
+            if path=='/api/studio-flows/start':return self.reply(value=flow_manager().start(body))
+            if path=='/api/studio-flows/control':return self.reply(value=flow_manager().control(body.get('id',''),body.get('action',''),body))
             if path=='/api/project-evidence/capture':
                 association=evidence_association(body)
                 return self.reply(value=evidence_manager().capture(association['projectId'],body,association))
@@ -2097,6 +2140,7 @@ class Handler(BaseHTTPRequestHandler):
             if path=='/api/remove':
                 with LOCK:
                     pid=body['id']
+                    if any(f['status'] not in ('completed','cancelled') and pid in f['projectIds'] for f in STATE.get('studioFlows',{}).get('flows',[])):raise ValueError('剧目正在连续流程中，请先停止对应流程')
                     if any(pid in j['ids'] and j['status'] in ['running','queued','pausing'] for j in JOBS.values()):raise ValueError('任务运行中，不能移除')
                     STATE['projects']=[p for p in STATE['projects'] if p['id']!=pid];save()
                 return self.reply(value={'removed':True})

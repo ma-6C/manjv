@@ -33,7 +33,7 @@ def main():
         width=1440, height=960, min_size=(1024, 720), background_color='#f7f8fc',
         text_select=True, confirm_close=False)
     def on_closing():
-        active = any(j['status'] in ['queued', 'running', 'pausing'] for j in server.JOBS.values()) or bool(server.SOURCE_MANAGER and any(j['status'] in ['queued','running'] for j in server.SOURCE_MANAGER.list()))
+        active = any(j['status'] in ['queued', 'running', 'pausing'] for j in server.JOBS.values()) or bool(server.SOURCE_MANAGER and any(j['status'] in ['queued','running'] for j in server.SOURCE_MANAGER.list())) or any(f['status']=='running' for f in server.STATE.get('studioFlows',{}).get('flows',[]))
         if active:
             return window.create_confirmation_dialog('任务仍在运行', '关闭后任务和已完成检查点会保留，重新打开后可继续。确定关闭？')
         return True
