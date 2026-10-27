@@ -1,6 +1,6 @@
 # 漫剧工坊
 
-Windows 本地视频制作工作台。最新本地交付为 **0.9.0**，用于已有剧集的素材导入、选集下载、字幕处理、重组分集、封面与剪映工程制作。发行内容和验收边界见 [0.9.0 交付说明](docs/release-0.9.0.md)。
+Windows 本地视频制作工作台。最新本地交付为 **0.9.1**，用于已有剧集的素材导入、选集下载、字幕处理、重组分集、封面与剪映工程制作。发行内容和验收边界见 [0.9.1 交付说明](docs/release-0.9.1.md)。
 
 本仓库存放主程序源码、测试与构建脚本。安装包、独立离线 AI 引擎、运行环境、用户工程、账号登录态和发行私钥在本地单独保存。
 
@@ -11,7 +11,7 @@ Windows 本地视频制作工作台。最新本地交付为 **0.9.0**，用于�
 - `codex/unified-production-window`：保留的开发分支，本轮功能提交已纳入 `main`。
 - [`design/start-work` 分支](https://github.com/ma-6C/manjv/tree/design/start-work)：独立的五阶段引导流程原型，使用示例数据，尚未接入正式处理服务。
 
-最新本地安装包仍为 0.9.0；其后的源码修复尚未重新打包。2026-10-27 的主分支同步与旧分支清理范围见[分支整理记录](docs/branch-cleanup-20261027.md)。
+0.9.1 已将字幕输出校验、错误诊断、原生文件选择和 AI 去字幕页面设置改进打入新安装包。2026-10-27 的主分支同步与旧分支清理范围见[分支整理记录](docs/branch-cleanup-20261027.md)。
 
 现有工作台支持“开始连续制作”和“仅合并切分”。连续制作依次执行已开启的 AI 文案、源片字幕修复、画面处理与分集、高光包装、封面、制作记录、成本报告。字幕处理先于重组；已完成的单步合并任务可复用分集继续后续步骤，避免重复编码。
 
@@ -51,6 +51,7 @@ Windows 本地视频制作工作台。最新本地交付为 **0.9.0**，用于�
 | `engines/` | 引擎来源和版本清单，以及保留许可的腾讯上传适配源码 |
 | `versions/v0.8.6/` | 46项构建输入SHA256与本次验收摘要 |
 | `versions/v0.9.0/` | 85项构建输入SHA256与0.9.0发行验收摘要 |
+| `versions/v0.9.1/` | 90项构建输入SHA256与0.9.1发行验收摘要 |
 | `test_*.py`、`verify_*.py`、`ui-*.cjs` | 隔离检查与界面验收脚本 |
 | `tools/` | 构建输入核对与源码上传检查 |
 
@@ -74,7 +75,7 @@ python -m venv .venv
 
 ```powershell
 python tools/verify_build_inputs.py --version v0.8.6
-python tools/record_release_inputs.py --version v0.9.0 --verify
+python tools/record_release_inputs.py --version v0.9.1 --verify
 python tools/audit_repository.py
 ```
 
