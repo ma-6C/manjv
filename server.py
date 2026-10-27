@@ -20,6 +20,7 @@ import subprocess
 import sys
 import threading
 import time
+import traceback
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -32,6 +33,7 @@ import api_connections as connections
 import media_download
 import promotions
 import task_progress as telemetry
+import file_picker
 import hongguo_source
 import guoapp_source
 from source_imports import check_storage
@@ -58,6 +60,7 @@ JOBS = {}
 QUEUE_THREAD = None
 QUEUE_WAKE = threading.Event()
 QUEUE_STOP = threading.Event()
+NATIVE_BROWSE = None
 SOURCE_MANAGER = None
 PUBLISH_WORKSPACE = None
 EVIDENCE_MANAGER = None
@@ -174,12 +177,37 @@ def save():
         replace_state_file(tmp,DATA / 'state.json')
         persist_jobs()
 
-def log(message, level='info', job=None):
-    entry = {'time': time.strftime('%Y-%m-%d %H:%M:%S'), 'message': ai.redact(message), 'level': level, 'job': job}
+def diagnostic_text(message):
+    text=ai.redact(message)
+    for secret in SECRETS.values():
+        if secret:text=text.replace(secret,'[已隐藏]')
+    return telemetry.safe_text(text)
+
+
+def log(message, level='info', job=None, diagnostic=None):
+    item=JOBS.get(job,{})
+    current=telemetry.snapshot(item).get('current') or {}
+    entry = {'time': time.strftime('%Y-%m-%d %H:%M:%S'), 'message': diagnostic_text(message), 'level': level, 'job': job,
+             'stage':item.get('stage',''),'project':item.get('project',''),'video':current.get('name','')}
+    if diagnostic:
+        entry['diagnostic']=copy.deepcopy(diagnostic)
+        for key in ('stage','video','project'):entry[key]=diagnostic.get(key) or entry[key]
     with LOCK:
         STATE['logs'].append(entry)
         STATE['logs'] = STATE['logs'][-1000:]
         save()
+
+
+def log_export(entries):
+    lines=[]
+    for entry in entries:
+        d=entry.get('diagnostic') or {}
+        context=' · '.join(str(x) for x in (entry.get('project'),entry.get('video'),d.get('stage') or entry.get('stage'),entry.get('job')) if x)
+        lines.append(f'{entry["time"]} [{entry["level"]}] '+context+'\n'+entry['message'])
+        if d:
+            lines.append('下一步：'+d.get('nextStep',''))
+            lines.append('技术详情：'+str(d.get('tool',''))+' · 退出码 '+str(d.get('exitCode'))+'\n'+d.get('details','')+'\n'+d.get('traceback',''))
+    return diagnostic_text('\n\n'.join(lines))
 
 def number(value, low, high, name):
     if isinstance(value,bool) or value is None or isinstance(value,str) and not value.strip():
@@ -264,7 +292,7 @@ def run_process(args, job=None, timeout=None, cwd=None, observe=None, track=None
         if observe:
             # Drain both pipes concurrently, including tqdm carriage-return updates. Never block on a full stderr pipe.
             import codecs
-            tails={'out':bytearray(),'err':bytearray()};reader_errors=[]
+            tails={'out':bytearray(),'err':bytearray()};reader_errors=[];error_lines=[]
             def drain(pipe,key):
                 decoder=codecs.getincrementaldecoder('utf-8')('replace');pending=''
                 try:
@@ -274,7 +302,10 @@ def run_process(args, job=None, timeout=None, cwd=None, observe=None, track=None
                         pending+=decoder.decode(chunk)
                         parts=re.split(r'[\r\n]',pending);pending=parts.pop()[-65536:]
                         for line in parts:
-                            if line:observe(line)
+                            if line:
+                                if telemetry.ERROR_LINE.search(line):
+                                    error_lines.append(line[:2000]);del error_lines[:-64]
+                                observe(line)
                     if pending:observe(pending)
                 except Exception as e:reader_errors.append(e)
             readers=[threading.Thread(target=drain,args=(proc.stdout,'out'),daemon=True),threading.Thread(target=drain,args=(proc.stderr,'err'),daemon=True)]
@@ -294,13 +325,22 @@ def run_process(args, job=None, timeout=None, cwd=None, observe=None, track=None
         if job and JOBS[job]['cancel'].is_set():
             raise InterruptedError('任务已停止')
         if proc.returncode:
-            msg = stderr.decode('utf-8', 'replace')[-3000:]
-            raise RuntimeError('媒体处理失败：' + msg)
+            detail=stderr.decode('utf-8', 'replace')
+            if observe and error_lines:detail='\n'.join(error_lines)+'\n'+detail
+            error=telemetry.ProcessFailure(args[0],proc.returncode,detail,stdout.decode('utf-8','replace'))
+            if job and track:error.video=(telemetry._row(JOBS[job],track) or {}).get('name','')
+            raise error
         return stdout
     except subprocess.TimeoutExpired:
         proc.kill()
-        proc.communicate()
-        raise RuntimeError('媒体命令超时')
+        if observe:
+            proc.wait()
+            for reader in readers:reader.join(timeout=5)
+            stdout,stderr=bytes(tails['out']),bytes(tails['err'])
+        else:stdout,stderr=proc.communicate()
+        error=telemetry.ProcessFailure(args[0],proc.returncode,stderr.decode('utf-8','replace'),stdout.decode('utf-8','replace'),timed_out=True)
+        if job and track:error.video=(telemetry._row(JOBS[job],track) or {}).get('name','')
+        raise error
     finally:
         if job:
             with LOCK:
@@ -344,7 +384,7 @@ def probe(path):
     dur = re.search(r'Duration: (\d+):(\d+):([\d.]+)', t)
     dim = re.search(r'Video:.*?\b(\d{2,5})x(\d{2,5})\b', t)
     if not dur or not dim:
-        raise ValueError(f'无法读取视频：{Path(path).name}')
+        raise telemetry.MediaProbeError(path,FFMPEG,proc.returncode,t)
     h, m, s = dur.groups()
     return {'duration': int(h)*3600 + int(m)*60 + float(s), 'width': int(dim[1]),
             'height': int(dim[2]), 'audio': 'Audio:' in t,
@@ -1040,7 +1080,8 @@ def vsr_subtitle(p,cfg,job):
         args+=['--inpaint-mode','sttn-det' if cfg['vsrMode']=='sttn' else cfg['vsrMode']]
         stage(job,f'本地AI去字幕：{i+1}/{len(videos)}，模型 {cfg["vsrMode"]}',10+i/len(videos)*80)
         tid=telemetry.begin(JOBS[job],'加载模型／准备字幕修复',v['name'],unit='frames')
-        if cfg['vsrMode']=='lama-box' or cfg.get('vsrReuseWorker',True) and cfg['vsrMode']=='sttn-auto':
+        engine_log=''
+        if cfg['vsrMode'] in ('lama-box','sttn-auto'):
             coords=[[int(r['y']*h),int((r['y']+r['h'])*h),int(r['x']*w),int((r['x']+r['w'])*w)] for r in subtitle_regions(cfg)]
             def attach(proc):
                 with LOCK:JOBS[job]['processes'].add(proc)
@@ -1051,6 +1092,7 @@ def vsr_subtitle(p,cfg,job):
                 observe=lambda line:telemetry.vsr_event(JOBS[job],tid,line),heartbeat=lambda:telemetry.heartbeat(JOBS[job],tid),attach=attach,detach=detach)
             if not cfg.get('vsrReuseWorker',True):pool.close()
             JOBS[job]['vsrWorker']=stats
+            engine_log=stats.pop('engineLog','')
             JOBS[job]['localRepairEngine']=cfg['vsrMode']
             if stats.get('fallback'):log('LaMa 推理已自动改用 CPU：'+stats['fallback'],level='warning',job=job)
             log(('复用常驻模型' if stats['reusedProcess'] else '启动常驻模型')+f'，累计处理 {stats["completedVideos"]} 集，模型加载 {stats["modelLoads"]} 次',job=job)
@@ -1059,10 +1101,12 @@ def vsr_subtitle(p,cfg,job):
             run_process(args,job,cwd=root,observe=lambda line:telemetry.vsr_event(JOBS[job],tid,line),track=tid,env=os.environ|{'PYTHONUNBUFFERED':'1','PYTHONIOENCODING':'utf-8'})
         telemetry.finalizing(JOBS[job],tid,'模型处理已退出，正在校验视频')
         if not target.is_file() or target.stat().st_size<128:
-            raise RuntimeError('AI引擎未生成有效视频：'+v['name']+'。请检查本地引擎、模型和磁盘空间；本集未完成，已完成集数保留。')
+            detail=f'输出路径：{target}\n文件大小：{target.stat().st_size if target.is_file() else "文件不存在"}\n'+engine_log
+            raise telemetry.OutputValidationError('AI引擎未生成有效视频：'+v['name']+'。本集未完成，已完成集数保留。',detail,v['name'])
         try:meta=probe(target)
         except (ValueError,RuntimeError) as e:
-            raise RuntimeError('AI输出视频无法读取：'+v['name']+'。请查看任务日志中的引擎错误；本集未完成，可修复环境后重试。') from e
+            detail=f'输出路径：{target}\n文件大小：{target.stat().st_size} 字节\n'+getattr(e,'details',str(e))+'\n引擎输出：\n'+engine_log
+            raise telemetry.OutputValidationError('AI输出视频无法读取：'+v['name']+'。本集未计为完成。',detail,v['name'],getattr(e,'tool',''),getattr(e,'exit_code',None)) from e
         if abs(meta['duration']-v['duration'])>.3:raise RuntimeError('AI输出未覆盖完整视频：'+v['name']+f'，原片 {v["duration"]:.2f} 秒，输出 {meta["duration"]:.2f} 秒。已保留现场，请重试当前视频。')
         if v.get('audio') and not meta['audio']:
             stage(job,'恢复原片音轨：'+v['name'],10+i/len(videos)*80)
@@ -1072,6 +1116,9 @@ def vsr_subtitle(p,cfg,job):
             if not audio_meta['audio'] or abs(audio_meta['duration']-v['duration'])>.3:
                 raise RuntimeError('AI输出音轨恢复失败，本集未登记完成，请查看日志后重试')
             restored.replace(target)
+        telemetry.finalizing(JOBS[job],tid,'正在完整解码校验修复结果：'+v['name'])
+        run_process([FFMPEG,'-hide_banner','-v','error','-xerror','-nostdin','-i',str(target),'-map','0:v:0','-map','0:a:0?','-f','null','-'],job,
+            timeout=max(120,min(900,v['duration']*2)),observe=lambda line:None,track=tid)
         register(p,target,'AI字幕处理',job);checkpoint(job,key,[target]);outputs.append(target)
         telemetry.finish(JOBS[job],tid)
         with LOCK:JOBS[job]['telemetry']['batch']['done']+=1
@@ -1352,6 +1399,7 @@ def worker(jid,ids,kind,cfg):
     try:
         licensing.require(DATA)
         job.update(status='running',runStarted=run_start)
+        job.pop('diagnostic',None);job.pop('error',None)
         job.pop('encoderSelection',None);job.pop('gpuFallback',None)
         for key in ('fallbackCode','fallbackReason','probeProfile'):job.get('encoding',{}).pop(key,None)
         telemetry.settle(job,'interrupted')
@@ -1448,11 +1496,10 @@ def worker(jid,ids,kind,cfg):
         job.update(status='paused' if job.get('pauseRequested') else 'cancelled',stage='已暂停，可从检查点继续' if job.get('pauseRequested') else '已停止；已完成文件保留')
         log('任务已停止',level='warning',job=jid)
     except Exception as e:
-        msg=ai.redact(str(e))
-        for secret in SECRETS.values():
-            if secret:msg=msg.replace(secret,'[已隐藏]')
-        job.update(status='failed',stage='任务失败',error=msg)
-        log(msg,level='error',job=jid)
+        diagnostic=telemetry.failure(job,e,redact=diagnostic_text,trace=traceback.format_exc())
+        msg=diagnostic_text(str(e))
+        job.update(status='failed',stage=diagnostic['stage']+' · 失败',error=msg,diagnostic=diagnostic)
+        log(diagnostic['reason'],level='error',job=jid,diagnostic=diagnostic)
     finally:
         connections.TRACE_CALLBACKS.pop(jid,None)
         telemetry.settle(job,job['status'])
@@ -1806,6 +1853,7 @@ def public_state():
         result['studioFlows']=studio_flows
         result.pop('studioFlowTasks',None)
         result['jobs']=[{**{k:v for k,v in j.items() if k not in ['cancel','processes','config','sourceSnapshot','checkpoints']},
+                         'diagnostic':telemetry.job_failure(j,redact=diagnostic_text),
                          'workflowPlan':production_plan(j['kind'],j['config'],bool(j.get('options',{}).get('continueFromJob'))),
                          'telemetry':telemetry.snapshot(j),'completedProjects':sum(k.endswith(':project-done') for k in j.get('checkpoints',{})),
                          'checkpointCount':len(j.get('checkpoints',{})), 'resumable':j['kind'] in LOCAL_JOB_KINDS and j['kind']!='track_sheet'} for j in JOBS.values()][-200:]
@@ -1989,7 +2037,8 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_header('Content-Disposition','attachment; filename="promotion-revenue.csv"');self.end_headers();self.wfile.write(data);return
             if url.path=='/api/file':return self.file(allowed_file(q.get('path',[''])[0]),q.get('download',['0'])[0]=='1')
             if url.path=='/api/logs/download':
-                data='\n'.join(f'{e["time"]} [{e["level"]}] {e["message"]}' for e in STATE['logs']).encode('utf-8-sig')
+                selected_job=q.get('job',[''])[0]
+                data=log_export([e for e in STATE['logs'] if not selected_job or e.get('job')==selected_job]).encode('utf-8-sig')
                 self.send_response(200);self.send_header('Content-Type','text/plain; charset=utf-8');self.send_header('Content-Length',str(len(data)))
                 self.send_header('Content-Disposition','attachment; filename="manju-logs.txt"');self.end_headers();self.wfile.write(data);return
             relative=urllib.parse.unquote(url.path).lstrip('/') or 'index.html';path=(PUBLIC/relative).resolve()
@@ -2248,32 +2297,10 @@ class Handler(BaseHTTPRequestHandler):
                     STATE['accounts']=[a for a in STATE['accounts'] if a['id']!=body['id']];save()
                 return self.reply(value={'removed':True})
             if path=='/api/browse':
-                mode=body.get('mode','folder')
-                if mode=='editor':
-                    script="Add-Type -AssemblyName System.Windows.Forms; $d=New-Object System.Windows.Forms.OpenFileDialog; $d.Filter='JianyingPro.exe|JianyingPro.exe'; [Console]::OutputEncoding=[System.Text.Encoding]::UTF8; if($d.ShowDialog() -eq 'OK'){Write-Output $d.FileName}"
-                    proc=subprocess.run(['powershell','-NoProfile','-STA','-Command',script],capture_output=True,timeout=180,creationflags=getattr(subprocess,'CREATE_NO_WINDOW',0))
-                    if proc.returncode:raise ValueError('剪映主程序选择窗口未能打开')
-                    return self.reply(value={'path':proc.stdout.decode('utf-8-sig','replace').strip()})
-                if mode in ('images','documents'):
-                    file_filter='Images|*.jpg;*.jpeg;*.png;*.webp' if mode=='images' else 'Reports|*.pdf;*.docx;*.csv;*.jpg;*.jpeg;*.png;*.webp'
-                    script="Add-Type -AssemblyName System.Windows.Forms; $d=New-Object System.Windows.Forms.OpenFileDialog; $d.Filter='"+file_filter+"'; $d.Multiselect=$true; [Console]::OutputEncoding=[System.Text.Encoding]::UTF8; if($d.ShowDialog() -eq 'OK'){ ConvertTo-Json -Compress -InputObject @($d.FileNames) } else { Write-Output '[]' }"
-                    proc=subprocess.run(['powershell','-NoProfile','-STA','-Command',script],capture_output=True,timeout=180,creationflags=getattr(subprocess,'CREATE_NO_WINDOW',0))
-                    if proc.returncode:raise ValueError('附件选择窗口未能打开')
-                    return self.reply(value={'paths':json.loads(proc.stdout.decode('utf-8-sig','replace').strip() or '[]')})
-                if mode=='videos':
-                    script="Add-Type -AssemblyName System.Windows.Forms; $d=New-Object System.Windows.Forms.OpenFileDialog; $d.Filter='Video files|*.mp4;*.mov;*.mkv;*.avi;*.m4v;*.webm;*.ts'; $d.Multiselect="+('$false' if body.get('multiple') is False else '$true')+"; [Console]::OutputEncoding=[System.Text.Encoding]::UTF8; if($d.ShowDialog() -eq 'OK'){ ConvertTo-Json -Compress -InputObject @($d.FileNames) } else { Write-Output '[]' }"
-                    proc=subprocess.run(['powershell','-NoProfile','-STA','-Command',script],capture_output=True,timeout=180,creationflags=getattr(subprocess,'CREATE_NO_WINDOW',0))
-                    if proc.returncode:raise ValueError('视频选择窗口未能打开，可以在文件名工具中粘贴本地路径')
-                    return self.reply(value={'paths':json.loads(proc.stdout.decode('utf-8-sig','replace').strip() or '[]')})
-                script="Add-Type -AssemblyName System.Windows.Forms; "
-                if mode in ['template','python','image','engine','audio']:
-                    script+="$d=New-Object System.Windows.Forms.OpenFileDialog; $d.Filter='"+('Audio|*.mp3;*.wav;*.m4a;*.aac;*.flac;*.ogg' if mode=='audio' else 'AI engine (*.zip)|*.zip' if mode=='engine' else 'Word template (*.docx)|*.docx' if mode=='template' else 'Images (*.jpg;*.jpeg;*.png;*.webp)|*.jpg;*.jpeg;*.png;*.webp' if mode=='image' else 'Python runtime (*.exe)|*.exe')+"';"
-                else:script+="$d=New-Object System.Windows.Forms.FolderBrowserDialog; $d.Description='选择文件夹';"
-                script+="if($d.ShowDialog() -eq 'OK'){"
-                script+="[Console]::OutputEncoding=[System.Text.Encoding]::UTF8; Write-Output $d."+('FileName' if mode in ['template','python','image','engine','audio'] else 'SelectedPath')+'}'
-                proc=subprocess.run(['powershell','-NoProfile','-STA','-Command',script],capture_output=True,timeout=180,
-                    creationflags=getattr(subprocess,'CREATE_NO_WINDOW',0))
-                return self.reply(value={'path':proc.stdout.decode('utf-8-sig','replace').strip()})
+                try:return self.reply(value=file_picker.choose(body,native=NATIVE_BROWSE))
+                except Exception as error:
+                    log('打开文件选择窗口失败：'+str(error),level='error')
+                    raise
             if path=='/api/open-output':
                 target=project_dir(get_project(body['id']),STATE['config']) if body.get('id') else Path(STATE['config']['output']).resolve()
                 target.mkdir(parents=True,exist_ok=True)

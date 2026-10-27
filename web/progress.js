@@ -31,7 +31,7 @@ function monitorTaskControls(job){
 function monitorNotice(job){
  const cloud=job.kind==='video_generate',r=job.telemetry?.current;
  if(monitorConnectionLost)return ['warning','暂时无法获取最新状态',`上次成功获取状态：${new Date(monitorReceivedAt).toLocaleTimeString('zh-CN')}。保留上次进度，请检查服务连接；不会自动重新提交云端任务。`];
- if(job.status==='failed')return ['error','任务未完成',`${job.error||'请查看详细日志'}。已完成的检查点保留；恢复时会核对源素材。`];
+ if(job.status==='failed')return ['error',job.diagnostic?.stage||'任务未完成',job.diagnostic?.reason||job.error||'旧任务没有保存具体报错'];
  if(['paused','interrupted','cancelled'].includes(job.status))return ['warning',cloud?'本机查询已停止，云端任务可能继续':'已完成结果与检查点保留',cloud?'继续时查询原云端任务，不重复提交。云端可能继续生成和计费，取消云端任务需到对应平台核对。':'继续后跳过有效检查点，当前未完成视频重新处理；不承诺帧级续跑。'];
  if(job.status==='pausing')return ['warning','正在处理暂停请求','等待当前进程退出后才会显示已暂停。当前未完成视频不计入完成数量。'];
  if(job.gpuFallback)return ['warning','已自动切换 CPU 编码',`${job.gpuFallback.detail}。${job.status==='completed'?'制作已完成，可核对输出结果。':'已完成视频和队列保留，继续处理剩余部分。'}下载队列不受此编码设置影响。`];
@@ -52,7 +52,7 @@ function monitorDetailHTML(job){
  ${monitorBar(job.status==='completed'?{percent:100}:r,job)}<div class="monitor-caption"><span>${esc(monitorUnits(r))}</span><span>${r?.progressAt?'最近进度 '+new Date(r.progressAt*1000).toLocaleTimeString('zh-CN'):'执行阶段反馈'}</span></div>
  <div class="monitor-metrics"><div><small>任务累计运行</small><strong>${monitorClock(seconds)}</strong></div><div><small>${r?.unit==='bytes'?'下载速度':'处理速度'}</small><strong>${esc(monitorSpeed(r,job))}</strong></div><div><small>当前步骤预计剩余</small><strong>${esc(eta)}</strong></div></div>
  ${other.length?`<div class="monitor-parallel"><h3>并行处理中的其他视频</h3>${other.map(row=>`<div class="monitor-parallel-row"><span>${esc(row.name||row.label)}</span><strong>${row.percent==null?'等待反馈':row.percent+'%'}</strong>${monitorBar(row,job,row.name)}</div>`).join('')}</div>`:''}
- <div class="monitor-notice ${notice[0]}" role="${notice[0]==='error'?'alert':'note'}">${icon('info')}<div><strong>${esc(notice[1])}</strong><p>${esc(notice[2])}</p></div></div>
+ ${job.status==='failed'?taskFailureHTML(job):`<div class="monitor-notice ${notice[0]}" role="note">${icon('info')}<div><strong>${esc(notice[1])}</strong><p>${esc(notice[2])}</p></div></div>`}
  <div class="monitor-actions">${monitorTaskControls(job)}${job.status==='failed'&&/401|403|密钥|鉴权|unauthorized/i.test(job.error||'')?'<a class="button" href="#api">检查接口设置</a>':''}</div>`;
 }
 function monitorBatchHTML(job){
@@ -69,7 +69,7 @@ function updateMonitor(){
  if(current!=='progress'||!$('#monitor-detail'))return;
  const job=monitorJob(),focus=document.activeElement?.closest('[data-progress-action]'),focusAction=focus?.dataset.progressAction,focusId=focus?.dataset.id;
  $('#monitor-stats').innerHTML=[['任务总数',state.jobs.length],['正在运行',state.jobs.filter(j=>monitorLive.has(j.status)).length],['已完成',state.jobs.filter(j=>j.status==='completed').length],['需关注',state.jobs.filter(j=>['failed','paused','interrupted'].includes(j.status)).length]].map(([label,n])=>`<div><small>${label}</small><strong>${n}<span> 个任务</span></strong></div>`).join('');
- $('#monitor-detail').innerHTML=monitorDetailHTML(job);$('#monitor-batch').innerHTML=job?monitorBatchHTML(job):'<p class="blank-inline">暂无阶段进度</p>';$('#monitor-queue').innerHTML=monitorRows();
+ setDiagnosticHTML($('#monitor-detail'),monitorDetailHTML(job));$('#monitor-batch').innerHTML=job?monitorBatchHTML(job):'<p class="blank-inline">暂无阶段进度</p>';$('#monitor-queue').innerHTML=monitorRows();
  if(focusAction)$$('[data-progress-action]').find(b=>b.dataset.progressAction===focusAction&&b.dataset.id===focusId&&!b.disabled)?.focus({preventScroll:true});
  const signature=job?.id+':'+job?.status+':'+job?.telemetry?.phase;
  if(signature!==monitorStatusSignature){monitorStatusSignature=signature;$('#monitor-announcement').textContent=job?`${job.project||'制作任务'}，${statusLabels[job.status]||job.status}。${job.telemetry?.phase||job.stage}`:'暂无制作任务';}
@@ -93,7 +93,7 @@ document.addEventListener('click',async e=>{
   if(action==='stop')monitorStop(job);
   if(action==='close')monitorDialog.close();
   if(action==='output')await api('open-output',{id:job.result?.projectId||job.ids[0]||null});
-  if(action==='logs'){const logs=state.logs.filter(l=>l.job===job.id);monitorDialog.innerHTML=`<div class="dialog-top"><h2 id="monitor-dialog-title">任务日志 · ${esc(job.id)}</h2><button class="button" data-progress-action="close">关闭</button></div><div class="monitor-log">${logs.map(l=>`<p><time>${esc(l.time)}</time> ${esc(l.message)}</p>`).join('')||'<p>暂无日志</p>'}</div>`;monitorDialog.showModal();}
+  if(action==='logs'){const logs=state.logs.filter(l=>l.job===job.id);monitorDialog.innerHTML=`<div class="dialog-top"><h2 id="monitor-dialog-title">任务日志 · ${esc(job.id)}</h2><button class="button" data-progress-action="close">关闭</button></div>${taskFailureHTML(job)}<div class="monitor-log">${logs.map(l=>`<p><time>${esc(l.time)}</time> ${esc(l.message)}</p>`).join('')||'<p>暂无日志</p>'}</div>`;monitorDialog.showModal();}
   if(action==='report'){const report=await api('jobs/report?id='+encodeURIComponent(job.id)),url=URL.createObjectURL(new Blob([JSON.stringify(report,null,2)],{type:'application/json;charset=utf-8'})),a=document.createElement('a');a.href=url;a.download=`漫剧工坊-任务诊断-${job.id}.json`;a.click();setTimeout(()=>URL.revokeObjectURL(url),2000);toast('已导出诊断摘要，不含接口密钥、授权码和完整文件路径');}
  }catch(err){toast(err.message,true);}finally{if(b.isConnected)b.disabled=false;}
 });

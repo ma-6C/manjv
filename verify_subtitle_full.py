@@ -20,6 +20,14 @@ def create(pid,**body):
     return s.JOBS[result['id']]
 def run(job):s.worker(job['id'],job['ids'],job['kind'],job['config']);return job
 
+def controlled_engine(work):
+    """Inject engine output at its process boundary; validation remains real."""
+    def perform(runtime,root,request,*args,**kwargs):
+        command=[str(runtime),'-m','backend.main','--input',request['input'],'--output',request['output'],'--inpaint-mode',request['mode']]
+        work(command)
+        return {'reusedProcess':False,'completedVideos':1,'modelLoads':1}
+    return patch.object(s.vsr_pool.POOL,'run',perform)
+
 try:
     folder=BASE/'source';folder.mkdir()
     first=folder/'01.mp4'
@@ -48,24 +56,25 @@ try:
     s.STATE['config'].update(subtitleMode='vsr',vsrRoot=engine['root'],vsrPython=engine['python'],vsrMode='sttn-auto',vsrReuseWorker=False)
     # Controlled engine failures use real playable inputs; no model calls here.
     broken=create(pid,sourceVideoPaths={pid:[paths[0]]})
-    with patch.object(s,'run_process',lambda *a,**k:b''):run(broken)
+    with controlled_engine(lambda *a,**k:b''):run(broken)
     check('silent_engine_without_output_is_not_completed',broken['status']=='failed' and '有效视频' in broken['error'] and not any(a['job']==broken['id'] for a in project['artifacts']))
     invalid=create(pid,sourceVideoPaths={pid:[paths[1]]})
     def corrupt(command,*a,**k):Path(command[command.index('--output')+1]).write_bytes(b'not-video'*100);return b''
-    with patch.object(s,'run_process',corrupt):run(invalid)
+    with controlled_engine(corrupt):run(invalid)
     check('invalid_engine_output_reports_actionable_failure',invalid['status']=='failed' and 'AI输出视频无法读取' in invalid['error'])
+    check('corrupt_output_retains_real_ffmpeg_reason','Invalid data found' in invalid['error'] and invalid['diagnostic']['code']=='MEDIA_OUTPUT')
     recovery=create(pid,sourceVideoPaths={pid:[paths[0],paths[1],paths[2]]});calls=[]
     def partial(command,*a,**k):
         calls.append(command[command.index('--input')+1])
         if len(calls)==2:raise RuntimeError('controlled interruption after first full video')
         shutil.copy2(command[command.index('--input')+1],command[command.index('--output')+1]);return b''
-    with patch.object(s,'run_process',partial):run(recovery)
+    with controlled_engine(partial):run(recovery)
     check('partial_failure_preserves_first_completed_episode',recovery['status']=='failed' and len(recovery['checkpoints'])==1)
     completed=s.cached(recovery['id'],f'{pid}:subtitle:0')[0];completed_stat=completed.stat().st_mtime_ns
     calls.clear()
     def finish(command,*a,**k):calls.append(command[command.index('--input')+1]);shutil.copy2(calls[-1],command[command.index('--output')+1]);return b''
     with patch.object(s,'ensure_runner',lambda:None):s.control_job(recovery['id'],'resume')
-    with patch.object(s,'run_process',finish):run(recovery)
+    with controlled_engine(finish):run(recovery)
     check('resume_automatically_handles_remaining_two_only',recovery['status']=='completed' and calls==[paths[1],paths[2]] and completed.stat().st_mtime_ns==completed_stat)
     # Simulate upstream losing audio, with real FFmpeg restoration in the app.
     silent=BASE/'silent.mp4';s.ff(['-i',str(first),'-an','-c:v','copy',str(silent)])
@@ -73,7 +82,7 @@ try:
     def no_audio(command,*a,**k):
         if '--inpaint-mode' in command:shutil.copy2(silent,command[command.index('--output')+1]);return b''
         return original_run(command,*a,**k)
-    with patch.object(s,'run_process',no_audio):run(audio_job)
+    with controlled_engine(no_audio):run(audio_job)
     audio_result=next(a for a in project['artifacts'] if a['job']==audio_job['id'])
     check('missing_audio_is_recovered_without_reencoding_video',audio_job['status']=='completed' and s.probe(audio_result['path'])['audio'])
     check('all_original_media_unchanged',all(s.sha256(p)==digest for p,digest in hashes.items()))

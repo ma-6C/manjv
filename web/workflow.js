@@ -42,6 +42,44 @@ function productionHandoffHTML(){
  const single=job.kind==='transcode',done=job.status==='completed';
  return `<div class="production-handoff ${job.status==='failed'?'failed':''}" role="status"><strong>${single?'合并切分任务':'连续制作任务'} · ${esc(statusLabels[job.status]||job.status)}</strong><p>${esc(job.error||(done?(single?'分集已保存；本次只执行了合并切分，可复用这些文件继续已启用的后续步骤。':'本次所选制作步骤已完成，可以核对成片和发布材料。'):job.stage))}</p><div class="actions-row">${productionContinuationButton(job)}<button class="button small" data-action="production-view" data-id="${esc(job.id)}">查看制作进度</button>${done&&!single?'<a class="button small" href="#publish">核对发布材料</a>':''}</div>${done&&single?'<p class="field-hint">接续使用当前勾选的文案、包装、封面、工程与成本设置，保留原选集和分集文件。字幕修复应从连续制作入口在合并前完成。</p>':''}</div>`;
 }
+
+let subtitleSettingsTab='production',subtitleSettingsTrigger=null;
+const subtitleSettingSections=[['production','完整制作设置','layers'],['local','本地 AI 引擎','cpu'],['cloud','云端服务连接','link']];
+function subtitleSettingsOpen(){return !!$('#subtitle-settings-dialog')?.open;}
+function subtitleSettingsHTML(){
+ const panels=[
+card('完整制作设置','layers',field('字幕处理方式','subtitleMode',{options:[['vsr','本地 AI · VSR'],['local','本地区域修补 · delogo'],['cloud','云端 AI 适配器']]})+
+   '<div id="subtitle-settings-mode-note">'+alert(state.config.subtitleMode==='local'?'区域修补用周围像素填充，复杂背景可能变平滑。请先检查试处理效果。':state.config.subtitleMode==='vsr'?'本地神经网络修复使用已安装的 VSR 引擎，无需云端密钥。':'云端需要配置服务适配器；当前契约只支持一个字幕选区。')+'</div>'+
+   toggle('完整流水线先去字幕','subtitleAuto','开启后，全部源视频先去字幕，再调色、变速、合并与分集；最终分集用于包装、材料包和上传。')+
+   '<p class="field-hint">上方「当前整集」处理源视频下拉框选中的完整视频；「整剧连续」处理当前剧集的全部已导入视频。自由选集可从红果素材页发起「仅去字幕 · 全部所选集」。</p>'),card('本地 AI 引擎','cpu',field('VSR 项目目录','vsrRoot',{browse:true})+field('引擎 Python','vsrPython',{browse:true})+field('本地修复引擎','vsrMode',{options:[['sttn-auto','STTN · 时序视频修复'],['lama-box','LaMa · 框选区域逐帧修复'],['sttn-det','STTN · 原检测流程（需额外依赖）'],['lama','LaMa · 原检测流程（需额外依赖）'],['propainter','ProPainter · 原检测流程（需额外依赖）']],hint:'STTN 与 LaMa 框选模式是两条独立本地修复路线；新任务使用当前选择，已排队任务保留原选择。'})+field('LaMa 推理设备','lamaDevice',{options:[['auto','自动：优先 GPU，失败回退 CPU'],['cpu','CPU']],hint:'仅作用于 LaMa 框选修复；与视频编码 GPU 开关独立。'})+toggle('批量复用 AI 模型','vsrReuseWorker','STTN 时序修复与 LaMa 框选修复连续多集复用各自模型，空闲2分钟释放。切换引擎会释放上一套模型；关闭后每集重新启动。')+'<p class="field-hint">STTN 结合前后帧修复；LaMa 按帧修补选区，动态背景可能闪烁，建议先对同一段试处理比较。LaMa 框选路线为独立开源适配，不代表已还原超人助手的本地修复算法。</p>'),card('云端服务连接','link',field('字幕适配器 HTTPS 地址','subtitleEndpoint',{placeholder:'https://你的服务/video/clear'})+field('异步任务轮询地址','subtitlePoll',{placeholder:'https://你的服务/video/status'})+`<div class="field"><label for="subtitle-key">字幕服务密钥</label><input id="subtitle-key" type="password" autocomplete="off" placeholder="仅在本次服务进程中保存"></div><button class="button" data-action="save-subtitle-key">设置本次会话密钥</button><p class="field-hint">POST {video_base64, filename, region}；同步响应 {status, video_url}，异步响应 {task_id, status}。文件上限 80MB。</p>`)
+ ];
+ return `<dialog id="subtitle-settings-dialog" class="subtitle-settings-dialog" aria-labelledby="subtitle-settings-title"><header class="subtitle-settings-header"><div><h2 id="subtitle-settings-title">AI 去字幕设置</h2><p>选择左侧项目，调整本页面的制作参数。</p></div><button type="button" class="icon-button" data-action="subtitle-settings-close" aria-label="关闭字幕设置">×</button></header><div class="subtitle-settings-layout"><nav class="subtitle-settings-nav" role="tablist" aria-label="字幕设置分类" aria-orientation="vertical">${subtitleSettingSections.map(([key,label,ico])=>`<button type="button" id="subtitle-settings-tab-${key}" role="tab" aria-controls="subtitle-settings-panel-${key}" aria-selected="${subtitleSettingsTab===key}" tabindex="${subtitleSettingsTab===key?0:-1}" data-action="subtitle-settings-tab" data-tab="${key}">${icon(ico)}<span>${label}</span></button>`).join('')}</nav><div class="subtitle-settings-panels">${subtitleSettingSections.map(([key],i)=>`<section id="subtitle-settings-panel-${key}" role="tabpanel" aria-labelledby="subtitle-settings-tab-${key}" ${subtitleSettingsTab===key?'':'hidden'}>${panels[i]}</section>`).join('')}</div></div><footer class="subtitle-settings-footer"><span id="subtitle-settings-save-state" role="status">修改后自动保存到本机</span><div class="actions-row"><button class="button" data-action="save-config">${icon('save')}保存设置</button><button class="button primary" data-action="subtitle-settings-close">完成</button></div></footer></dialog>`;
+}
+function selectSubtitleSettingsTab(key,focus=false){
+ if(!subtitleSettingSections.some(([id])=>id===key))return;
+ subtitleSettingsTab=key;
+ subtitleSettingSections.forEach(([id])=>{const tab=$('#subtitle-settings-tab-'+id),panel=$('#subtitle-settings-panel-'+id);if(tab){tab.setAttribute('aria-selected',String(id===key));tab.tabIndex=id===key?0:-1;}if(panel)panel.hidden=id!==key;});
+ if(focus)$('#subtitle-settings-tab-'+key)?.focus();
+}
+function subtitleSettingsSaveState(status,message=''){
+ const el=$('#subtitle-settings-save-state');if(el){el.textContent=status==='saving'?'保存中…':status==='failed'?'保存失败：'+message:'已保存到本机';el.classList.toggle('failed',status==='failed');}
+}
+function updateSubtitleSettingsControls(patch={}){
+ if(current!=='subtitle')return;
+ for(const key of Object.keys(patch)){const el=$('#subtitle-settings-dialog [data-config="'+key+'"]');if(el){if(el.type==='checkbox')el.checked=!!state.config[key];else el.value=state.config[key]??'';}}
+ const note=$('#subtitle-settings-mode-note');if(note)note.innerHTML=alert(state.config.subtitleMode==='local'?'区域修补用周围像素填充，复杂背景可能变平滑。请先检查试处理效果。':state.config.subtitleMode==='vsr'?'本地神经网络修复使用已安装的 VSR 引擎，无需云端密钥。':'云端需要配置服务适配器；当前契约只支持一个字幕选区。');
+ const scope=$('#subtitle-full-scope');if(scope)scope.textContent=subtitleScopeSummary();
+ subtitleSettingsSaveState('saved');
+}
+function subtitleScopeSummary(){const p=activeProject(),v=studioVideo();return (v?`当前整集：${v.name} · ${timecode(v.duration)}；整剧：${p.videos.length} 集 · 合计 ${duration(p.videos.reduce((sum,item)=>sum+item.duration,0))}。`:'先导入素材，再选择要处理的剧集。')+'当前方式：'+(({vsr:'本地 AI 修复',local:'本地区域修补',cloud:'云端 AI 适配器'})[state.config.subtitleMode]||'未选择')+'。';}
+document.addEventListener('keydown',event=>{
+ const tab=event.target.closest('#subtitle-settings-dialog [role="tab"]');if(!tab)return;
+ const keys=subtitleSettingSections.map(([key])=>key),at=keys.indexOf(tab.dataset.tab);let next;
+ if(event.key==='ArrowDown')next=(at+1)%keys.length;else if(event.key==='ArrowUp')next=(at+keys.length-1)%keys.length;else if(event.key==='Home')next=0;else if(event.key==='End')next=keys.length-1;else return;
+ event.preventDefault();selectSubtitleSettingsTab(keys[next],true);
+});
+document.addEventListener('close',event=>{if(event.target.id==='subtitle-settings-dialog'&&subtitleSettingsTrigger?.isConnected)subtitleSettingsTrigger.focus({preventScroll:true});},true);
+
 function subtitleWorkspaceHTML(){
  const p=activeProject();if(p)studioIndex=Math.min(studioIndex,p.videos.length-1);
  studioDraft=structuredClone(state.config.subtitleRegions?.length?state.config.subtitleRegions:[state.config.subtitleRegion]);
@@ -53,16 +91,11 @@ function subtitleWorkspaceHTML(){
   <div class="studio-transport"><button class="button small" data-action="studio-play" aria-label="播放或暂停源视频">${icon('play')}播放</button><button class="button small" data-action="studio-step" data-offset="-1" aria-label="后退1秒">−1s</button><input id="studio-seek" type="range" min="0" max="${v.duration}" step="0.033333" value="0" aria-label="视频时间轴"><button class="button small" data-action="studio-step" data-offset="1" aria-label="前进1秒">+1s</button><output id="studio-clock">0:00.00 / ${timecode(v.duration)}</output></div>
   <div class="region-toolbar"><div id="region-tabs"></div><button class="button small" data-action="region-add">${icon('plus')}添加选区</button><button class="button small" data-action="region-remove">${icon('trash')}删除当前</button></div><p class="field-hint">拖动画面空白处重画当前选区；拖动选区可移动，右下角可缩放。也可用下方比例输入精确调整，最多保存 8 个选区。</p>
   <div class="grid-2">${f('左侧位置比例 x','x')}${f('顶部位置比例 y','y')}${f('区域宽度比例 w','w')}${f('区域高度比例 h','h')}</div>`:'<p class="blank-inline">先导入视频，即可在真实画面中框选字幕。</p>';
- return intro('AI 去字幕','框选字幕区域后，可直接处理完整一集或连续处理整部剧；5 秒和 10 秒仅用于试处理。')+picker()+
-  card('整片去字幕','film',`<p class="section-description">只修复框选区域，覆盖每集从 0 秒到结尾的全部时长，保留原片音轨。多集会自动接着处理，无需逐集确认。</p><p id="subtitle-full-scope" class="field-hint">${v?`当前整集：${esc(v.name)} · ${timecode(v.duration)}；整剧：${p.videos.length} 集 · 合计 ${duration(p.videos.reduce((sum,item)=>sum+item.duration,0))}。`:'先导入素材，再选择要处理的剧集。'}当前方式：${esc(({vsr:'本地 AI 修复',local:'本地区域修补',cloud:'云端 AI 适配器'})[state.config.subtitleMode]||'未选择')}。</p><div class="actions-row subtitle-full-actions"><button class="button primary" data-action="subtitle-full" data-scope="current" ${!v?'disabled':''}>${icon('film')}当前整集去字幕</button><button class="button" data-action="subtitle-full" data-scope="series" ${!v?'disabled':''}>${icon('layers')}整剧连续去字幕 · ${p?.videos.length||0} 集</button></div><div id="subtitle-full-error" class="source-read-error" role="alert" tabindex="-1" hidden></div><div id="subtitle-full-result" aria-live="polite"></div>`)+
+ return intro('AI 去字幕','框选字幕区域后，可直接处理完整一集或连续处理整部剧；5 秒和 10 秒仅用于试处理。',`<button class="button subtitle-settings-trigger" data-action="subtitle-settings-open" aria-haspopup="dialog" aria-controls="subtitle-settings-dialog">${icon('settings')}设置</button>`)+picker()+
+  card('整片去字幕','film',`<p class="section-description">只修复框选区域，覆盖每集从 0 秒到结尾的全部时长，保留原片音轨。多集会自动接着处理，无需逐集确认。</p><p id="subtitle-full-scope" class="field-hint">${esc(subtitleScopeSummary())}</p><div class="actions-row subtitle-full-actions"><button class="button primary" data-action="subtitle-full" data-scope="current" ${!v?'disabled':''}>${icon('film')}当前整集去字幕</button><button class="button" data-action="subtitle-full" data-scope="series" ${!v?'disabled':''}>${icon('layers')}整剧连续去字幕 · ${p?.videos.length||0} 集</button></div><div id="subtitle-full-error" class="source-read-error" role="alert" tabindex="-1" hidden></div><div id="subtitle-full-result" aria-live="polite"></div>`)+
   card('画面与字幕选区','subtitle',editor+saveFooter())+
   card('短片试处理','play',`<p class="section-description">从当前播放位置截取短片，使用本页设置处理。两侧同步播放，可直接检查字幕残留与背景修复。</p><div class="actions-row"><button class="button primary" data-action="subtitle-preview" data-seconds="5" ${v?'':'disabled'}>${icon('play')}试处理 5 秒</button><button class="button" data-action="subtitle-preview" data-seconds="10" ${v?'':'disabled'}>试处理 10 秒</button><a class="button subtle" href="#logs">查看任务队列</a></div><div id="subtitle-preview-result"></div>`)+
-  connectionTaskCard(['subtitle'])+card('完整制作设置','layers',field('字幕处理方式','subtitleMode',{options:[['vsr','本地 AI · VSR'],['local','本地区域修补 · delogo'],['cloud','云端 AI 适配器']]})+
-   alert(state.config.subtitleMode==='local'?'区域修补用周围像素填充，复杂背景可能变平滑。请先检查试处理效果。':state.config.subtitleMode==='vsr'?'本地神经网络修复使用已安装的 VSR 引擎，无需云端密钥。':'云端需要配置服务适配器；当前契约只支持一个字幕选区。')+
-   toggle('完整流水线先去字幕','subtitleAuto','开启后，全部源视频先去字幕，再调色、变速、合并与分集；最终分集用于包装、材料包和上传。')+
-   '<p class="field-hint">上方「当前整集」处理源视频下拉框选中的完整视频；「整剧连续」处理当前剧集的全部已导入视频。自由选集可从红果素材页发起「仅去字幕 · 全部所选集」。</p>'+saveFooter())+
-  card('本地 AI 引擎','cpu',field('VSR 项目目录','vsrRoot',{browse:true})+field('引擎 Python','vsrPython',{browse:true})+field('本地修复引擎','vsrMode',{options:[['sttn-auto','STTN · 时序视频修复'],['lama-box','LaMa · 框选区域逐帧修复'],['sttn-det','STTN · 原检测流程（需额外依赖）'],['lama','LaMa · 原检测流程（需额外依赖）'],['propainter','ProPainter · 原检测流程（需额外依赖）']],hint:'STTN 与 LaMa 框选模式是两条独立本地修复路线；新任务使用当前选择，已排队任务保留原选择。'})+field('LaMa 推理设备','lamaDevice',{options:[['auto','自动：优先 GPU，失败回退 CPU'],['cpu','CPU']],hint:'仅作用于 LaMa 框选修复；与视频编码 GPU 开关独立。'})+toggle('批量复用 AI 模型','vsrReuseWorker','STTN 时序修复与 LaMa 框选修复连续多集复用各自模型，空闲2分钟释放。切换引擎会释放上一套模型；关闭后每集重新启动。')+'<p class="field-hint">STTN 结合前后帧修复；LaMa 按帧修补选区，动态背景可能闪烁，建议先对同一段试处理比较。LaMa 框选路线为独立开源适配，不代表已还原超人助手的本地修复算法。</p>'+saveFooter())+
-  card('云端服务连接','link',field('字幕适配器 HTTPS 地址','subtitleEndpoint',{placeholder:'https://你的服务/video/clear'})+field('异步任务轮询地址','subtitlePoll',{placeholder:'https://你的服务/video/status'})+`<div class="field"><label for="subtitle-key">字幕服务密钥</label><input id="subtitle-key" type="password" autocomplete="off" placeholder="仅在本次服务进程中保存"></div><button class="button" data-action="save-subtitle-key">设置本次会话密钥</button><p class="field-hint">POST {video_base64, filename, region}；同步响应 {status, video_url}，异步响应 {task_id, status}。文件上限 80MB。</p>`)+filesCard(['AI字幕处理','字幕处理']);
+  subtitleSettingsHTML()+filesCard(['AI字幕处理','字幕处理']);
 }
 function updateFullSubtitleResult(){
  const target=$('#subtitle-full-result');if(!target)return;
@@ -146,24 +179,46 @@ function updatePreviewResult(force=false){
  before.addEventListener('seeking',sync);before.addEventListener('ratechange',()=>{after.playbackRate=before.playbackRate;});
  before.addEventListener('timeupdate',()=>{if(Math.abs(after.currentTime-before.currentTime)>.2)sync();});
 }
-function taskHistoryHTML(){return card('任务队列与历史','layers',`<p class="section-description">任务与参数会保存在本机。暂停或重启后，从已完成的视频和制作阶段继续；未完成的视频会重做。上传与登录任务需重新核对。</p><div id="task-history">${taskRows()}</div>`);}
+function setDiagnosticHTML(target,html){
+ if(!target||target.dataset.diagnosticSignature===html)return;
+ const selection=window.getSelection();if(selection?.toString()&&target.contains(selection.anchorNode))return;
+ const opened=new Set([...target.querySelectorAll('details[open][data-failure-details]')].map(el=>el.dataset.failureDetails));
+ target.innerHTML=html;target.dataset.diagnosticSignature=html;
+ target.querySelectorAll('[data-failure-details]').forEach(el=>el.open=opened.has(el.dataset.failureDetails));
+}
+function taskFailureHTML(job){
+ if(job?.status!=='failed')return '';
+ const d=job.diagnostic||{},row=job.telemetry?.current||{},phase=d.stage||job.telemetry?.phase||job.stage||'未记录失败阶段';
+ return `<section class="task-failure" aria-label="任务失败原因"><strong>${esc(phase)}${d.video||row.name?' · '+esc(d.video||row.name):''}</strong>${d.summary?`<p>${esc(d.summary)}</p>`:''}<dl><dt>原始报错</dt><dd class="task-failure-reason">${esc(d.reason||job.error||'旧任务未记录具体报错，请查看本任务日志。')}</dd><dt>下一步</dt><dd>${esc(d.nextStep||'根据原始报错核对当前步骤，再重试未完成部分。')}</dd></dl><details data-failure-details="${esc(job.id)}"><summary>技术详情${d.tool?' · '+esc(d.tool):''}${d.exitCode!=null?' · 退出码 '+esc(d.exitCode):''}</summary><p>${esc([d.time,d.exceptionType,d.code,'任务 '+job.id].filter(Boolean).join(' · '))}</p><pre>${esc(d.details||job.error||'没有记录原始输出')}${d.traceback?'\n\n'+esc(d.traceback):''}</pre></details></section>`;
+}
+function taskHistoryHTML(){return card('任务队列与历史','layers',`<p class="section-description">失败任务直接显示处理步骤、视频、原始报错和下一步操作。</p><div id="task-history">${taskRows()}</div>`);}
 function taskRows(){
  if(!state.jobs.length)return '<p class="blank-inline">暂无任务。开始制作后可在这里暂停、恢复或重试。</p>';
- return state.jobs.slice().reverse().map(j=>{
+ return state.jobs.slice().reverse().sort((a,b)=>(a.status==='failed'?0:['running','queued','pausing'].includes(a.status)?1:2)-(b.status==='failed'?0:['running','queued','pausing'].includes(b.status)?1:2)).map(j=>{
   const active=['running','pausing','queued'].includes(j.status),resume=j.resumable&&['paused','interrupted','failed','cancelled'].includes(j.status);
   const seconds=(j.runSeconds||0)+(j.status==='running'&&j.runStarted?Date.now()/1000-j.runStarted:0);
-  return `<article class="task-row" data-task-id="${j.id}"><div class="task-row-top"><strong>${esc(j.project||j.ids.map(id=>state.projects.find(p=>p.id===id)?.name||'已移除素材').join('、')||'账号操作')}</strong><span class="tag ${j.status==='completed'?'green':j.status==='failed'?'red':'gray'}">${statusLabels[j.status]||j.status}</span></div><div class="task-row-info">${jobLabels[j.kind]||j.kind} · ${j.ids.length} 部剧集 · ${j.checkpointCount||0} 个检查点${seconds?` · 已运行 ${Math.floor(seconds)} 秒`:''} · ${esc(j.id)}</div>${typeof monitorBar==='function'?monitorBar(j.status==='completed'?{percent:100}:j.telemetry?.current,j):''}<p>${esc(j.error||j.stage)}</p><div class="task-row-actions">${productionContinuationButton(j)}${active&&j.resumable&&j.status!=='pausing'?`<button class="button small" data-action="control-job" data-id="${j.id}" data-control="pause">暂停</button>`:''}${resume?`<button class="button small primary" data-action="control-job" data-id="${j.id}" data-control="resume">${j.status==='failed'?'重试未完成部分':'从检查点继续'}</button>`:''}${active?`<button class="button small" data-action="control-job" data-id="${j.id}" data-control="cancel">${j.status==='queued'?'取消排队':'停止'}</button>`:''}</div>${taskAPIDetails(j)}</article>`;
+  return `<article class="task-row" data-task-id="${j.id}"><div class="task-row-top"><strong>${esc(j.project||j.ids.map(id=>state.projects.find(p=>p.id===id)?.name||'已移除素材').join('、')||'账号操作')}</strong><span class="tag ${j.status==='completed'?'green':j.status==='failed'?'red':'gray'}">${statusLabels[j.status]||j.status}</span></div><div class="task-row-info">${jobLabels[j.kind]||j.kind} · ${j.ids.length} 部剧集 · ${j.checkpointCount||0} 个检查点${seconds?` · 已运行 ${Math.floor(seconds)} 秒`:''} · ${esc(j.id)}</div>${typeof monitorBar==='function'?monitorBar(j.status==='completed'?{percent:100}:j.telemetry?.current,j):''}${j.status==='failed'?taskFailureHTML(j):`<p>${esc(j.stage)}</p>`}<div class="task-row-actions">${productionContinuationButton(j)}<button class="button small" data-action="filter-job-logs" data-id="${esc(j.id)}">只看本任务日志</button><button class="button small" data-progress-action="report" data-id="${esc(j.id)}">导出诊断</button>${active&&j.resumable&&j.status!=='pausing'?`<button class="button small" data-action="control-job" data-id="${j.id}" data-control="pause">暂停</button>`:''}${resume?`<button class="button small primary" data-action="control-job" data-id="${j.id}" data-control="resume">${j.status==='failed'?'重试未完成部分':'从检查点继续'}</button>`:''}${active?`<button class="button small" data-action="control-job" data-id="${j.id}" data-control="cancel">${j.status==='queued'?'取消排队':'停止'}</button>`:''}</div>${taskAPIDetails(j)}</article>`;
  }).join('');
 }
 function mountWorkflow(){if(current==='subtitle')mountSubtitleStudio();}
 function updateWorkflowUI(){
  if(current==='subtitle'){updatePreviewResult();updateStudioProxy();updateFullSubtitleResult();}
- if(current==='logs'&&$('#task-history'))$('#task-history').innerHTML=taskRows();
+ if(current==='logs'&&$('#task-history')){
+  const target=$('#task-history'),html=taskRows(),selection=window.getSelection();
+  if(target.dataset.signature!==html&&!(selection?.toString()&&target.contains(selection.anchorNode))){
+   const opened=new Set([...target.querySelectorAll('details[open][data-failure-details]')].map(el=>el.dataset.failureDetails));
+   target.innerHTML=html;target.dataset.signature=html;target.querySelectorAll('[data-failure-details]').forEach(el=>el.open=opened.has(el.dataset.failureDetails));
+  }
+ }
  if(current==='preprocess'&&$('#production-config-plan')){const html=productionPlanItemsHTML();if($('#production-config-plan').innerHTML!==html)$('#production-config-plan').innerHTML=html;}
  if(current==='preprocess'&&$('#production-run-summary'))$('#production-run-summary').textContent='本次将执行：'+pipelineActivitySteps().map(s=>s[0]).join(' → ');
  if(current==='preprocess'&&$('#production-handoff')){const html=productionHandoffHTML();if($('#production-handoff').innerHTML!==html)$('#production-handoff').innerHTML=html;}
 }
 async function workflowAction(action,button){
+ if(action==='subtitle-settings-open'){subtitleSettingsTrigger=button;$('#subtitle-source')?.pause();const dialog=$('#subtitle-settings-dialog');if(dialog&&!dialog.open){dialog.showModal();selectSubtitleSettingsTab(subtitleSettingsTab,true);}return true;}
+ if(action==='subtitle-settings-close'){$('#subtitle-settings-dialog')?.close();return true;}
+ if(action==='subtitle-settings-tab'){selectSubtitleSettingsTab(button.dataset.tab);return true;}
+
  if(action==='subtitle-full'){
   const p=activeProject(),v=studioVideo();if(!p||!v)throw Error('请先导入并选择源视频');
   const paths=button.dataset.scope==='current'?[v.path]:p.videos.map(item=>item.path);

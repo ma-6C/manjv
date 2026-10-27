@@ -2,20 +2,91 @@
 from pathlib import Path
 import json,os,queue,subprocess,threading,time,uuid
 
-WORKER_SOURCE=r'''
+STRICT_IO_SOURCE=r'''
+import subprocess,tempfile,math,os
+APP_FFMPEG=''
+class CheckedVideoWriter:
+ def __init__(self,path,*args):
+  fps,size=args if len(args)==2 else args[1:]
+  w,h=map(int,size);fps=float(fps)
+  if not math.isfinite(fps) or fps<=0 or w<=0 or h<=0 or w%2 or h%2:raise ValueError(f'Invalid STTN video dimensions/frame rate: {w}x{h}, {fps}fps')
+  self.frames=0;self.fps=fps;self.size=(w,h);self.closed=False;self.failure=None;self.error_log=tempfile.TemporaryFile()
+  try:
+   self.process=subprocess.Popen([APP_FFMPEG,'-hide_banner','-loglevel','error','-nostdin','-y','-f','rawvideo','-pix_fmt','bgr24','-s',f'{w}x{h}','-r',str(fps),'-i','pipe:0','-an','-c:v','libx264','-preset','fast','-crf','18','-pix_fmt','yuv420p','-threads','2','-movflags','+faststart',str(path)],stdin=subprocess.PIPE,stdout=subprocess.DEVNULL,stderr=self.error_log,creationflags=getattr(subprocess,'CREATE_NO_WINDOW',0))
+  except Exception:
+   self.error_log.close();raise
+ def error_text(self):
+  self.error_log.seek(0);return self.error_log.read().decode('utf-8','replace')[-5000:]
+ def isOpened(self):return not self.closed and self.process.poll() is None
+ def write(self,frame):
+  import numpy as np
+  if frame.shape!=(self.size[1],self.size[0],3):raise ValueError(f'STTN frame size mismatch: {frame.shape}, expected {self.size}')
+  if frame.dtype!=np.uint8:frame=np.clip(frame,0,255).astype(np.uint8)
+  try:self.process.stdin.write(frame.tobytes());self.frames+=1
+  except (BrokenPipeError,OSError) as error:
+   try:self.process.wait(timeout=10)
+   except subprocess.TimeoutExpired:self.abort()
+   raise RuntimeError(f'STTN video encoder pipe closed; exit code {self.process.poll()}: '+self.error_text()) from error
+ def release(self):
+  if self.closed:
+   if self.failure:raise self.failure
+   return
+  self.closed=True
+  try:
+   try:self.process.stdin.close()
+   except (BrokenPipeError,OSError):pass
+   try:code=self.process.wait(timeout=600)
+   except subprocess.TimeoutExpired:
+    self.process.kill();self.process.wait(timeout=5);raise RuntimeError('STTN video encoder timed out: '+self.error_text())
+   if code:raise RuntimeError(f'STTN video encoder failed; exit code {code}: '+self.error_text())
+   if self.frames<=0:raise RuntimeError('STTN video encoder received no frames')
+  except Exception as error:self.failure=error;raise
+ def abort(self):
+  if self.process.poll() is None:
+   self.process.kill()
+   try:self.process.wait(timeout=5)
+   except subprocess.TimeoutExpired:pass
+  try:self.process.stdin.close()
+  except (BrokenPipeError,OSError,ValueError):pass
+ def dispose(self):
+  self.abort();self.error_log.close()
+
+def checked_merge_audio(sr):
+ writer=sr.video_writer
+ if not isinstance(writer,CheckedVideoWriter):raise RuntimeError('STTN checked writer was not installed')
+ writer.release()
+ if writer.frames+1<sr.frame_count:raise RuntimeError(f'STTN stopped before whole video: {writer.frames}/{sr.frame_count} frames')
+ duration=writer.frames/writer.fps
+ command=[APP_FFMPEG,'-hide_banner','-loglevel','error','-nostdin','-y','-i',str(sr.video_temp_file.name),'-i',str(sr.video_path),'-map','0:v:0','-map','1:a:0?','-c:v','copy','-c:a','aac','-b:a','192k','-af','aresample=async=1000:first_pts=0,apad','-t',str(duration),'-movflags','+faststart',str(sr.video_out_path)]
+ try:
+  result=subprocess.run(command,stdout=subprocess.PIPE,stderr=subprocess.PIPE,timeout=600,creationflags=getattr(subprocess,'CREATE_NO_WINDOW',0))
+  if result.returncode:raise RuntimeError(f'STTN audio/video mux failed; exit code {result.returncode}: '+result.stderr.decode('utf-8','replace')[-5000:])
+  sr.is_successful_merged=True
+ finally:sr.video_temp_file.close()
+'''
+
+WORKER_SOURCE=STRICT_IO_SOURCE+r'''
 import sys,json,os,gc,traceback
 from pathlib import Path
+sys.dont_write_bytecode=True
 out=sys.stdout
 sys.stdout=sys.stderr
 sys.__stdout__=sys.stderr
 def emit(value):out.write(json.dumps(value,ensure_ascii=True)+'\n');out.flush()
 root=Path(sys.argv[1]);sys.path.insert(0,str(root));os.chdir(root)
 try:
+ import backend.main as backend_main
  from backend.main import SubtitleRemover
  from backend.config import config
  from backend.tools.constant import InpaintMode
  import backend.inpaint.sttn_auto_inpaint as sttn
  import torch
+ # Apply only inside this child process; the signed engine files stay intact.
+ class CVProxy:
+  def __getattr__(self,name):return CheckedVideoWriter if name=='VideoWriter' else getattr(original_cv,name)
+ original_cv=backend_main.cv2;backend_main.cv2=CVProxy()
+ backend_main.FFmpegVideoWriter=CheckedVideoWriter
+ SubtitleRemover.merge_audio_to_video=checked_merge_audio
  factory=sttn.STTNInpaint;models={};loads=0;hits=0;completed=0
  def model(device,path):
   global loads,hits
@@ -25,13 +96,15 @@ try:
  sttn.STTNInpaint=model
  emit({'event':'ready','pid':os.getpid()})
 except Exception as error:
- emit({'event':'startup_error','error':str(error)});sys.exit(1)
+ emit({'event':'startup_error','error':str(error),'detail':traceback.format_exc()});sys.exit(1)
 for line in sys.stdin:
  request=json.loads(line)
  if request.get('cmd')=='quit':break
  sr=None
  try:
   if request.get('mode')!='sttn-auto':raise ValueError('Persistent worker supports STTN-auto only')
+  APP_FFMPEG=request.get('ffmpeg','')
+  if not APP_FFMPEG or not Path(APP_FFMPEG).is_file():raise ValueError('STTN requires the application FFmpeg executable')
   config.inpaintMode.value=InpaintMode.STTN_AUTO
   sr=SubtitleRemover(request['input'])
   if not sr.video_cap.isOpened() or sr.frame_count<=0:raise ValueError('VSR cannot open input video')
@@ -43,15 +116,18 @@ for line in sys.stdin:
   print(traceback.format_exc(),file=sys.stderr)
   models.clear();gc.collect()
   if torch.cuda.is_available():torch.cuda.empty_cache()
-  emit({'event':'result','id':request.get('id'),'ok':False,'error':str(error)})
+  emit({'event':'result','id':request.get('id'),'ok':False,'error':str(error),'detail':traceback.format_exc()})
  finally:
   if sr is not None:
-   try:sr.video_cap.release();sr.video_writer.release()
+   try:sr.video_cap.release();sr.video_writer.dispose();sr.video_temp_file.close()
    except Exception:pass
   sr=None;gc.collect()
 '''
 
-class WorkerError(RuntimeError):pass
+class WorkerError(RuntimeError):
+    def __init__(self,message,details='',exit_code=None):
+        self.details=details or message;self.tool='本地 AI 工作进程';self.exit_code=exit_code
+        super().__init__(message)
 
 class Client:
     def __init__(self,runtime,root,worker_source=None):
@@ -86,7 +162,7 @@ class Client:
             except queue.Empty:
                 if self.process.poll() is not None:raise WorkerError('AI工作进程已退出：'+self.tail[-1600:])
                 continue
-            if message.get('event') in ('closed','startup_error'):raise WorkerError(message.get('error') or 'AI工作进程意外退出：'+self.tail[-1600:])
+            if message.get('event') in ('closed','startup_error'):raise WorkerError(message.get('error') or 'AI工作进程意外退出：'+self.tail[-1600:],message.get('detail','')+'\n'+self.tail[-6000:],self.process.poll())
             return message
     def close(self):
         if self.closed:return
@@ -122,10 +198,12 @@ class Pool:
                     message=client.receive(cancel,time.monotonic()+180,heartbeat)
                     if message.get('event')!='ready':raise WorkerError('AI工作进程未就绪')
                 task=request|{'id':uuid.uuid4().hex}
+                client.tail=''
                 client.process.stdin.write((json.dumps(task,ensure_ascii=True)+'\n').encode());client.process.stdin.flush()
                 result=client.receive(cancel,time.monotonic()+max(600,min(28800,float(request.get('duration',60))*120)),heartbeat)
-                if result.get('id')!=task['id'] or not result.get('ok'):raise WorkerError('AI工作进程处理失败：'+str(result.get('error','响应不匹配'))+'；可关闭模型复用后重试')
+                if result.get('id')!=task['id'] or not result.get('ok'):raise WorkerError('AI工作进程处理失败：'+str(result.get('error','响应不匹配')),result.get('detail','')+'\n'+str(result.get('error',''))+'\n'+client.tail[-6000:],client.process.poll())
                 result['reusedProcess']=not cold
+                result['engineLog']=client.tail[-6000:]
                 return result
             except BaseException:
                 self.close();raise

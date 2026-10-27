@@ -8,6 +8,8 @@ import copy
 from pathlib import Path
 import threading
 import time
+import traceback
+import task_progress as telemetry
 
 
 class Adapter:
@@ -125,7 +127,10 @@ class Adapter:
                     task.update(status='interrupted', message=str(e), finishedAt=time.time());s.save()
             except Exception as e:
                 with s.LOCK:
-                    task.update(status='failed', message=s.ai.redact(str(e))[:2000], finishedAt=time.time());s.save()
+                    redact=getattr(s,'diagnostic_text',s.ai.redact)
+                    diagnostic=telemetry.failure({'stage':'交接到剪映'},e,redact=redact,trace=traceback.format_exc())
+                    task.update(status='failed', message=diagnostic['reason'],result={'failure':diagnostic},finishedAt=time.time());s.save()
+                    if callable(getattr(s,'log',None)):s.log(diagnostic['reason'],level='error',job=operation,diagnostic=diagnostic)
             finally:
                 with s.LOCK:self.threads.discard(threading.current_thread())
         thread = threading.Thread(target=run, name='flow-handoff', daemon=True)

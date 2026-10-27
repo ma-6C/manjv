@@ -1,0 +1,30 @@
+.subtitle-settings-trigger{align-self:flex-start;flex-shrink:0;margin-top:9px}
+.subtitle-settings-dialog{width:min(1000px,calc(100vw - 48px));max-width:1000px;max-height:calc(100dvh - 48px);padding:0;overflow:hidden;border-radius:16px}
+.subtitle-settings-dialog[open]{display:flex;flex-direction:column}
+.subtitle-settings-header{display:flex;justify-content:space-between;gap:20px;align-items:flex-start;padding:24px 28px 20px;border-bottom:1px solid var(--line);flex-shrink:0}
+.subtitle-settings-header h2{margin:0;font-size:21px;line-height:1.4}.subtitle-settings-header p{margin:6px 0 0;color:var(--muted);font-size:13px}
+.subtitle-settings-header .icon-button{width:36px;height:36px;font-size:25px;flex-shrink:0}
+.subtitle-settings-layout{display:grid;grid-template-columns:200px minmax(0,1fr);min-height:390px;max-height:calc(100dvh - 230px);overflow:hidden}
+.subtitle-settings-nav{padding:20px 12px;background:var(--canvas);border-right:1px solid var(--line);display:flex;flex-direction:column;gap:7px;overflow-y:auto}
+.subtitle-settings-nav button{display:flex;align-items:center;gap:10px;width:100%;min-height:48px;padding:12px;border:1px solid transparent;border-radius:8px;background:transparent;color:var(--muted);text-align:left;font-size:14px;line-height:1.5}
+.subtitle-settings-nav button svg{width:18px;height:18px;flex-shrink:0}
+.subtitle-settings-nav button:hover{background:#eeecf6}.subtitle-settings-nav button[aria-selected=true]{color:var(--purple-dark);background:var(--purple-soft);border-color:#dcd5f5;font-weight:600}
+.subtitle-settings-nav button:focus-visible{outline:3px solid #a298e1;outline-offset:-3px}
+.subtitle-settings-panels{padding:24px;overflow-y:auto;min-width:0;scroll-padding:18px}
+.subtitle-settings-panels [role=tabpanel][hidden]{display:none}
+.subtitle-settings-panels .card{margin:0;border:0;box-shadow:none}
+.subtitle-settings-panels .card-head{padding:0 0 18px}.subtitle-settings-panels .card-body{padding:20px 0 0}
+.subtitle-settings-panels .field label{font-size:13px}.subtitle-settings-panels .field-hint{font-size:12px;line-height:1.75}
+.subtitle-settings-footer{display:flex;justify-content:space-between;align-items:center;gap:20px;flex-shrink:0;padding:17px 24px;border-top:1px solid var(--line);background:#fff}
+.subtitle-settings-footer>span{color:var(--muted);font-size:12px;overflow-wrap:anywhere}.subtitle-settings-footer>span.failed{color:var(--red)}
+.subtitle-settings-footer .actions-row{margin:0;flex-shrink:0}
+@media(max-width:680px){
+ .subtitle-settings-dialog{width:calc(100vw - 20px);max-height:calc(100dvh - 24px);border-radius:12px}
+ .subtitle-settings-header{padding:18px 16px 14px;gap:12px}.subtitle-settings-header h2{font-size:18px}.subtitle-settings-header p{font-size:12px}
+ .subtitle-settings-layout{grid-template-columns:106px minmax(0,1fr);min-height:300px;max-height:calc(100dvh - 240px)}
+ .subtitle-settings-nav{padding:12px 6px;gap:6px}.subtitle-settings-nav button{font-size:12px;padding:12px 8px;gap:6px;align-items:flex-start}.subtitle-settings-nav button svg{display:none}
+ .subtitle-settings-panels{padding:16px 12px}.subtitle-settings-panels .card-head{padding-bottom:12px}.subtitle-settings-panels .card-head h2{font-size:15px}.subtitle-settings-panels .card-body{padding-top:14px}
+ .subtitle-settings-panels .path-input{flex-direction:column;align-items:stretch}.subtitle-settings-panels .path-input .button{align-self:flex-start}
+ .subtitle-settings-panels input,.subtitle-settings-panels select{font-size:12px;padding:9px 8px}
+ .subtitle-settings-footer{padding:13px 16px;gap:8px;flex-wrap:wrap}.subtitle-settings-footer .actions-row{margin-left:auto}
+}

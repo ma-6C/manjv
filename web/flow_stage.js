@@ -14,7 +14,7 @@
  const emit=()=>window.dispatchEvent(new CustomEvent('studio-flow-panel-change'));
  const status=x=>({queued:'排队中',running:'正在处理',completed:'已完成',failed:'未完成',interrupted:'已中断',waiting_window:'请切换到官方窗口',capturing:'正在采集'}[x]||x||'等待反馈');
  const button=(action,text,attrs='')=>`<button type="button" class="button small" data-studio-panel="${action}" ${attrs}>${text}</button>`;
- function put(selector,html){const el=root()?.querySelector(selector);if(el&&el.dataset.signature!==html){el.innerHTML=html;el.dataset.signature=html;}}
+ function put(selector,html){const el=root()?.querySelector(selector);if(el&&el.dataset.signature!==html){setDiagnosticHTML(el,html);el.dataset.signature=html;}}
  function outputs(f){return Object.entries(find(f,'production').result?.videos||{}).flatMap(([pid,rows])=>rows.map(v=>({...v,projectId:pid})));}
  function draftRows(f){const ref=find(f,'jianying').ref||{};return (ref.ids||[ref.id]).filter(Boolean).flatMap(jid=>(state.jobs.find(j=>j.id===jid)?.jianyingResults||[]).map((r,index)=>({...r,jobId:jid,index})));}
  function job(f,s){const ref=s.ref||{},rows=(ref.ids||[ref.id]).map(id=>state.jobs.find(j=>j.id===id)).filter(Boolean);return rows.find(j=>j.status==='running')||rows.find(j=>j.status==='queued')||rows[0];}
@@ -23,7 +23,7 @@
   if(!j)return '<p class="sp-muted">正在准备本次任务，收到实际进度后会显示在这里。</p>';
   const percentage=j.status==='completed'?100:t?.percent==null?null:Math.min(100,Math.max(0,Number(t.percent)));
   const elapsed=(j.runSeconds||0)+(j.status==='running'&&j.runStarted?Math.max(0,Date.now()/1000-j.runStarted):0);
-  return `<div class="sp-progress-heading"><strong>${esc(t?.label||j.stage||'正在准备')}</strong><span>${percentage==null?'等待实际反馈':percentage.toFixed(percentage%1?1:0)+'%'}</span></div><progress class="sp-progress" max="100" ${percentage==null?'':`value="${percentage}"`} aria-label="当前实际处理进度"></progress><p class="sp-muted">${esc(t?.name||'')}${t?.name?' · ':''}${esc(typeof monitorUnits==='function'?monitorUnits(t):'')}</p><div class="sp-metrics"><div><small>已运行</small><strong>${typeof monitorClock==='function'?monitorClock(elapsed):duration(elapsed)}</strong></div><div><small>处理速度</small><strong>${esc(typeof monitorSpeed==='function'?monitorSpeed(t,j):'—')}</strong></div><div><small>本步预计剩余</small><strong>${t?.etaSeconds!=null?'约 '+duration(t.etaSeconds):'估算中'}</strong></div></div>${j.error?`<p class="sp-error" role="alert">${esc(j.error)}</p>`:''}`;
+  return `<div class="sp-progress-heading"><strong>${esc(t?.label||j.stage||'正在准备')}</strong><span>${percentage==null?'等待实际反馈':percentage.toFixed(percentage%1?1:0)+'%'}</span></div><progress class="sp-progress" max="100" ${percentage==null?'':`value="${percentage}"`} aria-label="当前实际处理进度"></progress><p class="sp-muted">${esc(t?.name||'')}${t?.name?' · ':''}${esc(typeof monitorUnits==='function'?monitorUnits(t):'')}</p><div class="sp-metrics"><div><small>已运行</small><strong>${typeof monitorClock==='function'?monitorClock(elapsed):duration(elapsed)}</strong></div><div><small>处理速度</small><strong>${esc(typeof monitorSpeed==='function'?monitorSpeed(t,j):'—')}</strong></div><div><small>本步预计剩余</small><strong>${t?.etaSeconds!=null?'约 '+duration(t.etaSeconds):'估算中'}</strong></div></div>${j.status==='failed'?taskFailureHTML(j):''}`;
  }
  function outputHTML(f){const rows=outputs(f);return rows.length?`<label class="sp-label" for="sp-output-select">检查本次成品</label><select id="sp-output-select">${rows.map((v,i)=>`<option value="${i}">${esc(project(v.projectId).name||'本次素材')} / ${esc(v.path.split(/[\\/]/).at(-1))}</option>`).join('')}</select><video id="sp-output-video" controls preload="metadata" playsinline src="${esc(media(rows[0].path))}"></video><p class="sp-muted">这里使用本次任务登记的成品；切换步骤或关闭窗口前可以暂停播放。</p>`:'<p class="sp-muted">制作完成后，本次成品会显示在这里。</p>';}
  function importedDraft(f,row){return find(f,'editor_import').result?.imports?.find(r=>r.jobId===row.jobId&&r.index===row.index)||row.editorImport;}
@@ -56,7 +56,7 @@
    put('#sp-production-progress',progressHTML(f,s));const j=job(f,s);put('#sp-logs',(state.logs||[]).filter(l=>l.job===j?.id).slice(-30).map(l=>`<p><time>${esc(l.time)}</time> ${esc(l.message)}</p>`).join('')||'<p>等待本步日志。</p>');
    if(outputs(f).length&&!root()?.querySelector('#sp-output-video')){const out=document.createElement('section');out.innerHTML=outputHTML(f);root()?.querySelector('.sp-stage')?.append(out);}
   }
-  if(['jianying','editor_import'].includes(s.key)){put('#sp-draft-progress',s.key==='jianying'?progressHTML(f,s):editorChecksHTML(f,s));put('#sp-draft-list',draftsHTML(f));}
+  if(['jianying','editor_import'].includes(s.key)){put('#sp-draft-progress',(s.key==='jianying'?progressHTML(f,s):editorChecksHTML(f,s))+(s.result?.failure?taskFailureHTML({id:s.ref?.id||f.id,status:'failed',diagnostic:s.result.failure}):''));put('#sp-draft-list',draftsHTML(f));}
   if(s.key==='evidence'){
    await readOnce('evidence:'+pid,async()=>{cache.evidence.set(pid,await api('project-evidence/list?projectId='+encodeURIComponent(pid)));});
    if(root()?.querySelector('.sp-stage')?.dataset.projectId!==pid||root()?.querySelector('.sp-stage')?.dataset.stageKey!==s.key)return;

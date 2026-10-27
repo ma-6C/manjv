@@ -32,6 +32,7 @@ def main():
     window = webview.create_window('漫剧工坊', f'http://127.0.0.1:{port}/launch/{service.session.launch}',
         width=1440, height=960, min_size=(1024, 720), background_color='#f7f8fc',
         text_select=True, confirm_close=False)
+    server.NATIVE_BROWSE=lambda spec:server.file_picker.native_selection(window,spec)
     def on_closing():
         active = any(j['status'] in ['queued', 'running', 'pausing'] for j in server.JOBS.values()) or bool(server.SOURCE_MANAGER and any(j['status'] in ['queued','running'] for j in server.SOURCE_MANAGER.list())) or any(f['status']=='running' for f in server.STATE.get('studioFlows',{}).get('flows',[]))
         if active:
@@ -42,6 +43,7 @@ def main():
         webview.start(gui='edgechromium', debug=False, private_mode=False,icon=str(ROOT/'assets'/'app.ico'),
                       storage_path=str(server.DATA / 'desktop-profile'))
     finally:
+        server.NATIVE_BROWSE=None
         if server.SOURCE_MANAGER:server.SOURCE_MANAGER.shutdown()
         server.shutdown_jobs()
         service.shutdown()
