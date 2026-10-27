@@ -2,7 +2,7 @@
 
 let studioIndex=0,regionIndex=0,studioDraft=null,studioDrag=null,previewSignature='';
 const studioTimes=new Map();
-const jobLabels={pipeline:'完整制作',transcode:'重组分集',subtitle:'去字幕',preview:'短片试处理',playback:'兼容播放预览',video_generate:'历史视频生成（已停用）',highlight:'高光包装',cover:'制作封面',coverAI:'AI封面',rewrite:'AI文案',records:'制作记录',cost:'成本报告',package:'材料包',upload:'视频上传',login:'账号登录'};
+const jobLabels={pipeline:'完整制作',transcode:'重组分集',subtitle:'去字幕',preview:'字幕短片试处理',transform_preview:'画面短片对比',playback:'兼容播放预览',video_generate:'历史视频生成（已停用）',highlight:'高光包装',cover:'制作封面',coverAI:'AI封面',rewrite:'AI文案',records:'制作记录',cost:'成本报告',package:'材料包',upload:'视频上传',login:'账号登录'};
 const statusLabels={queued:'排队中',running:'处理中',pausing:'正在暂停',paused:'已暂停',interrupted:'待恢复',completed:'已完成',failed:'失败',cancelled:'已停止'};
 function regions(){return studioDraft||state.config.subtitleRegions?.length&&state.config.subtitleRegions||[state.config.subtitleRegion];}
 function studioVideo(){const p=activeProject();return p?.videos[Math.min(studioIndex,p.videos.length-1)];}

@@ -44,6 +44,7 @@ import track_sheets
 import vsr_pool
 import jianying_projects
 import highlight_render
+import transform_tools
 import lama_local
 import publish_workflow
 import project_evidence
@@ -62,7 +63,7 @@ PUBLISH_WORKSPACE = None
 EVIDENCE_MANAGER = None
 STUDIO_FLOW_MANAGER = None
 STUDIO_FLOW_ADAPTER = None
-LOCAL_JOB_KINDS = {'pipeline','transcode','subtitle','preview','playback','rewrite','cover','coverAI','records','cost','highlight','package','hook','promotion_package','track_sheet','jianying_project'}
+LOCAL_JOB_KINDS = {'pipeline','transcode','subtitle','preview','transform_preview','playback','rewrite','cover','coverAI','records','cost','highlight','package','hook','promotion_package','track_sheet','jianying_project'}
 SECRETS = {'apiKey': '', 'subtitleKey': ''}
 FFMPEG = os.environ.get('FFMPEG_EXE') or shutil.which('ffmpeg')
 if not FFMPEG:
@@ -100,6 +101,8 @@ DEFAULT = {
     'sauRoot': str(ROOT/'engines'/'social-auto-upload'), 'sauPython': sys.executable,
     'uploadMode': 'draft', 'uploadSchedule': '',
 }
+
+DEFAULT.update(copy.deepcopy(transform_tools.DEFAULTS))
 
 def read_json(path, fallback):
     try:
@@ -179,6 +182,8 @@ def log(message, level='info', job=None):
         save()
 
 def number(value, low, high, name):
+    if isinstance(value,bool) or value is None or isinstance(value,str) and not value.strip():
+        raise ValueError(f'{name}必须是数字')
     try:
         n = float(value)
     except (ValueError, TypeError):
@@ -215,7 +220,7 @@ def validate_config(c):
                         ('saturation', 0, 2), ('speed', .5, 2), ('cropPercent', 0, 15),
                         ('highlightCount', 1, 10), ('highlightMin', 0, 10), ('highlightMax', 0, 10), ('highlightFixed',0,10), ('highlightParallel',1,8),
                         ('subtitleFirst', 1, 100)]:
-        number(c[key], lo, hi, key)
+        c[key]=number(c[key], lo, hi, key)
     for key in ['width', 'height', 'parallel', 'highlightCount', 'highlightParallel', 'subtitleFirst']:
         if float(c[key]) != int(c[key]):
             raise ValueError(f'{key}必须为整数')
@@ -242,6 +247,8 @@ def validate_config(c):
     if str(out) == out.anchor or out == ROOT or out == DATA:
         raise ValueError('请选择单独的输出文件夹')
     c['output'] = str(out)
+    transform_tools.validate(c)
+    c['transformPresets']=transform_tools.validate_presets(c.get('transformPresets',[]))
     return c
 
 def run_process(args, job=None, timeout=None, cwd=None, observe=None, track=None, env=None):
@@ -719,16 +726,17 @@ def cover(p, cfg, job, ai=False):
 
 def filters(cfg, info, jobdir):
     # 在缩放前统一帧时间，保留 HEVC 尾帧；缩放可能清除输入帧的 duration。
-    vf = [f'setpts=PTS/{cfg["speed"]}', 'fps=30']
-    crop = float(cfg['cropPercent'])/100
+    vf = ([f'setpts=PTS/{cfg["speed"]}'] if cfg['speed']!=1 else [])+['fps=30']
+    crop = transform_tools.crop_filter(cfg,info)
     if crop:
-        vf.append(f'crop=trunc(iw*{1-crop*2}/2)*2:trunc(ih*{1-crop*2}/2)*2')
+        vf.append(crop)
     # 尺寸一致时跳过无效缩放，保留部分 HEVC 素材的尾帧时长元数据。
     if crop or info.get('width') != cfg['width'] or info.get('height') != cfg['height']:
         vf.extend([f'scale={cfg["width"]}:{cfg["height"]}:force_original_aspect_ratio=decrease',
                    f'pad={cfg["width"]}:{cfg["height"]}:(ow-iw)/2:(oh-ih)/2:color=black'])
-    vf.extend(['setsar=1',
-               f'eq=brightness={cfg["brightness"]}:contrast={cfg["contrast"]}:saturation={cfg["saturation"]}'])
+    vf.append('setsar=1')
+    if cfg['brightness']!=0 or cfg['contrast']!=1 or cfg['saturation']!=1:
+        vf.append(f'eq=brightness={cfg["brightness"]}:contrast={cfg["contrast"]}:saturation={cfg["saturation"]}')
     if cfg['markAI']:
         from PIL import Image, ImageDraw
         im = Image.new('RGBA',(250,64),(20,22,34,170))
@@ -745,27 +753,31 @@ def encoder_fallback(job,info,runtime=False):
     with LOCK:
         item=JOBS[job];first=not item.get('gpuFallback')
         item['gpuFallback']={'code':info['code'],'detail':info['detail'],'runtime':runtime,'time':time.time()}
-        item['encoderSelection']={'args':gpu_encoding.CPU_ARGS.copy(),'name':'libx264'}
-        item.setdefault('encoding',{}).update(videoEncoder='libx264',gpuRequested=True,fallbackCode=info['code'],fallbackReason=info['detail'])
+        quality=item.get('config',{}).get('encodeQuality','balanced')
+        item['encoderSelection']={'args':gpu_encoding.quality_args(gpu_encoding.CPU_ARGS,quality),'name':'libx264'}
+        item.setdefault('encoding',{}).update(videoEncoder='libx264',quality=quality,gpuRequested=True,fallbackCode=info['code'],fallbackReason=info['detail'])
         persist_jobs()
     if first:log('GPU 编码不可用，自动使用 CPU：'+info['detail'],level='warning',job=job)
 
 
 def encoder(cfg,job=None):
-    if not cfg['gpu']:return gpu_encoding.CPU_ARGS.copy()
+    quality=cfg.get('encodeQuality','balanced')
+    if not cfg['gpu']:
+        if job:JOBS[job].setdefault('encoding',{}).update(videoEncoder='libx264',quality=quality,gpuRequested=False)
+        return gpu_encoding.quality_args(gpu_encoding.CPU_ARGS,quality)
     with GPU_SELECTION_LOCK:
         item=JOBS.get(job,{})
         if item.get('encoderSelection'):return item['encoderSelection']['args'].copy()
         result=gpu_encoding.probe(FFMPEG,cfg['width'],cfg['height'],force=True,
             runner=lambda args:run_process(args,job,timeout=8))
         if result['available']:
-            args=result['encoderArgs'].copy()
+            args=gpu_encoding.quality_args(result['encoderArgs'],quality)
             if job:
                 item['encoderSelection']={'args':args,'name':args[1]}
-                item.setdefault('encoding',{}).update(videoEncoder=args[1],gpuRequested=True,probeProfile=result['profile'])
+                item.setdefault('encoding',{}).update(videoEncoder=args[1],quality=quality,gpuRequested=True,probeProfile=result['profile'])
             return args
         if job:encoder_fallback(job,result)
-        return gpu_encoding.CPU_ARGS.copy()
+        return gpu_encoding.quality_args(gpu_encoding.CPU_ARGS,quality)
 
 
 def encode_media(args,job):
@@ -1315,7 +1327,8 @@ def production_plan(kind,cfg,continuing=False):
                'coverAI':('AI封面','使用所选生图接口',['cover']),'records':('制作记录','保存实际处理记录',['records']),
                'cost':('成本报告','单独生成报告',['cost']),'rewrite':('AI文案','单独改写剧名与简介',['text']),
                'package':('整理发布材料','导出本地材料',['package']),
-               'jianying_project':('剪映真实工程','复制素材并生成可编辑时间线',['jianying_project'])}
+               'jianying_project':('剪映真实工程','复制素材并生成可编辑时间线',['jianying_project']),
+               'transform_preview':('画面短片对比','仅处理所选源片的5或10秒片段',['transform_preview'])}
         if kind in names:steps.append(list(names[kind]))
     return steps
 
@@ -1373,6 +1386,8 @@ def worker(jid,ids,kind,cfg):
                 stage(jid,'AI改写剧名与简介',8);step('text',lambda:rewrite(p,cfg,jid))
             material=p
             continuing=kind=='pipeline' and bool(job.get('options',{}).get('continueFromJob'))
+            fused=(kind=='pipeline' and not cfg['regroup'] and cfg['pipelineHighlight'] and not continuing
+                   and job.get('options',{}).get('transformPlanVersion',0)>=1)
             if kind=='pipeline' and cfg['subtitleAuto'] and not continuing:
                 stage(jid,'先去字幕，完成后进入重组分集',10)
                 cleaned=repair_subtitles(p,cfg,jid,True)
@@ -1383,6 +1398,14 @@ def worker(jid,ids,kind,cfg):
                     stage(jid,'复用已完成分集，继续后续制作',35)
                     files=continued_video_files(job['options'],pid)
                     checkpoint(jid,f'{pid}:video',files)
+                elif fused:
+                    stage(jid,'画面处理与高光包装：单次编码',35)
+                    files=cached(jid,f'{pid}:video')
+                    if files is None:
+                        files=highlight(material,cfg,jid)
+                        checkpoint(jid,f'{pid}:video',files)
+                    job.setdefault('encoding',{}).update(compositionPasses=1,transformFusion='source_episodes')
+                    completed('highlight')
                 else:
                     stage(jid,'使用去字幕结果重组分集' if material is not p else '整剧重组与画面处理',35)
                     files=transcode(material,cfg,jid)
@@ -1391,15 +1414,19 @@ def worker(jid,ids,kind,cfg):
                 repair_subtitles(p,cfg,jid,job.get('options',{}).get('subtitleAllSelected',False))
                 completed('subtitle')
             if kind=='preview':preview_subtitle(p,cfg,jid)
+            if kind=='transform_preview':
+                transform_tools.render_preview(sys.modules[__name__],p,cfg,jid)
+                completed('transform_preview')
             if kind=='playback':playback_proxy(p,cfg,jid)
             if kind=='hook':promotion_hook(p,cfg,jid)
             if kind=='promotion_package':promotion_package(p,cfg,jid)
-            if kind=='highlight' or (kind=='pipeline' and cfg['pipelineHighlight']):
+            if kind=='highlight' or (kind=='pipeline' and cfg['pipelineHighlight'] and not fused):
                 inputs=[] if kind=='highlight' and job.get('options',{}).get('highlightOriginalSelection') else final_videos(p)
                 options=cfg
                 if inputs:
                     material={**p,'videos':video_entries([a['path'] for a in inputs])}
-                    options=cfg|{'speed':1,'cropPercent':0,'brightness':0,'contrast':1,'saturation':1,'markAI':False}
+                    options=cfg|{'speed':1,'cropPercent':0,'transformCropMode':'symmetric','cropLeft':0,'cropRight':0,
+                                 'cropTop':0,'cropBottom':0,'brightness':0,'contrast':1,'saturation':1,'markAI':False}
                 else:material=p
                 set_final(p,highlight(material,options,jid),jid)
                 completed('highlight')
@@ -1608,7 +1635,7 @@ def create_job(body, *, config=None, flow_id=None, operation_id=None):
     if 'aiSelection' in body:
         cfg['aiSelection']=copy.deepcopy(body['aiSelection']);connections.validate(cfg)
     for pid in ids:get_project(pid)
-    options={'encodingPlanVersion':2} if kind in ('pipeline','transcode') else {}
+    options={'encodingPlanVersion':2,'transformPlanVersion':1} if kind in ('pipeline','transcode') else {}
     parent=None
     if 'continueFromJob' in body:
         if not isinstance(body['continueFromJob'],str) or not body['continueFromJob']:raise ValueError('接续任务编号无效')
@@ -1679,15 +1706,15 @@ def create_job(body, *, config=None, flow_id=None, operation_id=None):
         if row['projectId']!=ids[0] or row['status']=='cancelled':raise ValueError('推广任务与剧集不匹配或已取消')
         if not get_project(ids[0])['rights']:raise ValueError('请先确认素材授权')
         options={'promotionTask':copy.deepcopy(row)}
-    if kind in ['preview','playback']:
+    if kind in ['preview','transform_preview','playback']:
         if len(ids)!=1:raise ValueError('一次只试处理一部剧的视频')
         index=body.get('videoIndex',0)
-        if not isinstance(index,int) or not 0<=index<len(get_project(ids[0])['videos']):raise ValueError('请选择有效源视频')
+        if type(index) is not int or not 0<=index<len(get_project(ids[0])['videos']):raise ValueError('请选择有效源视频')
         options={'videoIndex':index}
-        if kind=='preview':
+        if kind in ('preview','transform_preview'):
             video=get_project(ids[0])['videos'][index];start=number(body.get('start',0),0,max(0,video['duration']-.25),'试处理起点')
             seconds=body.get('seconds',5)
-            if seconds not in [5,10]:raise ValueError('试处理时长请选择5秒或10秒')
+            if type(seconds) is not int or seconds not in [5,10]:raise ValueError('试处理时长请选择5秒或10秒')
             options.update(start=start,seconds=min(seconds,video['duration']-start))
     with LOCK:
         if operation_id:
@@ -1709,6 +1736,43 @@ def create_job(body, *, config=None, flow_id=None, operation_id=None):
         persist_jobs()
     ensure_runner()
     return {'id':jid}
+
+def store_config(cfg):
+    """Keep the accepted in-memory settings when a disk save is rejected."""
+    with LOCK:
+        previous=STATE['config'];STATE['config']=cfg
+        try:save()
+        except Exception:
+            STATE['config']=previous
+            # save() writes state before task metadata. If that later write
+            # failed, restore the old settings on disk as well when possible.
+            try:save()
+            except Exception:pass
+            raise
+
+def transform_presets(body):
+    """Persist named picture settings without paths, secrets or task state."""
+    with LOCK:
+        cfg=copy.deepcopy(STATE['config']);rows=transform_tools.validate_presets(cfg.get('transformPresets',[]))
+        action=body.get('action');pid=body.get('id')
+        old=next((row for row in rows if row['id']==pid),None)
+        if action=='save':
+            if pid is not None and not old:raise ValueError('画面方案不存在，请刷新后再保存')
+            selected=body.get('values',{})
+            if not isinstance(selected,dict) or not selected or any(k not in transform_tools.CONFIG_FIELDS for k in selected):
+                raise ValueError('画面方案只允许保存画面与编码参数')
+            normalized=transform_tools.validate(copy.deepcopy(cfg)|selected)
+            row={'id':pid or uuid.uuid4().hex[:12],'name':body.get('name'),
+                 'values':{key:normalized[key] for key in transform_tools.CONFIG_FIELDS}}
+            rows=[row if item['id']==pid else item for item in rows] if old else rows+[row]
+            pid=row['id']
+        elif action=='delete':
+            if not old:raise ValueError('画面方案不存在')
+            rows=[row for row in rows if row['id']!=pid]
+        else:raise ValueError('画面方案操作无效')
+        cfg['transformPresets']=transform_tools.validate_presets(rows)
+        store_config(validate_config(cfg))
+        return {'config':copy.deepcopy(cfg),'presets':copy.deepcopy(cfg['transformPresets']),'id':pid}
 
 def import_source_video(directory,meta,video,cover,details):
     """Register only a verified completed download; preserve the original source facts."""
@@ -2054,9 +2118,15 @@ class Handler(BaseHTTPRequestHandler):
                 return self.reply(value={'started':True})
             if path=='/api/config':
                 with LOCK:
-                    cfg=validate_config(STATE['config']|{k:v for k,v in body.items() if k in DEFAULT})
-                    STATE['config']=cfg;save()
+                    cfg=validate_config(copy.deepcopy(STATE['config'])|{k:v for k,v in body.items() if k in DEFAULT})
+                    store_config(cfg)
                 return self.reply(value={'config':cfg})
+            if path=='/api/transform/presets':
+                return self.reply(value=transform_presets(body))
+            if path=='/api/transform/diagnose':
+                return self.reply(value={'filters':gpu_encoding.filter_capabilities(FFMPEG),
+                    'gpuFilterProbe':gpu_encoding.probe_filter_chain(FFMPEG),
+                    'note':'仅检测当前媒体引擎和3帧CUDA缩放链；正式画面处理仍使用CPU滤镜，GPU开关用于实际可用的编码器。'})
             if path=='/api/secrets':
                 for key in SECRETS:
                     if key in body:

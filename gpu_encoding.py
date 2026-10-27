@@ -14,6 +14,11 @@ BACKENDS=[
 HARDWARE_CODECS={b['codec'] for b in BACKENDS}
 ENCODER_LABELS={'copy':'视频流复用／仅处理音轨','libx264':'CPU · libx264',**{b['codec']:'GPU · '+b['name'] for b in BACKENDS}}
 LOCK=threading.RLock();CACHE={};ADAPTERS=None
+FILTER_CACHE={};CHAIN_CACHE={}
+QUALITY_LEVELS=('speed','balanced','quality')
+QUALITY_LABELS={'speed':'速度优先','balanced':'平衡','quality':'画质优先'}
+FILTER_NAMES=('cropdetect','scdet','blackdetect','freezedetect','ssim','psnr','libvmaf',
+              'scale_cuda','colorspace_cuda','hwupload_cuda','hwdownload','signature')
 
 def failure(error):
     text=str(error).lower()
@@ -96,14 +101,124 @@ def adapters(force=False):
             except (OSError,subprocess.TimeoutExpired,ValueError,TypeError):pass
         ADAPTERS=(time.monotonic(),rows);return copy.deepcopy(rows)
 
-def cpu_arguments(args):
-    result=[];i=0;gpu_options={'-preset','-cq','-rc','-gpu','-surfaces','-forced-idr','-forced_idr','-quality','-qp_i','-qp_p','-global_quality','-look_ahead'}
+def _option(args,name,default=None):
+    return args[args.index(name)+1] if name in args and args.index(name)+1<len(args) else default
+
+
+def _put_option(args,name,value):
+    if name in args:args[args.index(name)+1]=str(value)
+    else:args.extend([name,str(value)])
+
+
+def _quality(quality):
+    if not isinstance(quality,str) or quality not in QUALITY_LEVELS:raise ValueError('编码画质档位无效')
+    return quality
+
+
+def quality_args(args,quality='balanced'):
+    """Map a named quality to the selected encoder without changing its backend.
+
+    Balanced is exactly the already-probed profile. A legacy NVENC profile keeps
+    its accepted preset; its CQ can still be adjusted without introducing p1-p7.
+    These are encoder-specific starting points, not equal-quality score claims.
+    """
+    quality=_quality(quality);result=list(args)
+    if quality=='balanced':return result
+    codec=_option(result,'-c:v');number=23 if quality=='speed' else 19
+    if codec=='libx264':
+        _put_option(result,'-preset','veryfast' if quality=='speed' else 'medium')
+        _put_option(result,'-crf',number)
+    elif codec=='h264_nvenc':
+        if re.fullmatch(r'p[1-7]',str(_option(result,'-preset',''))):
+            _put_option(result,'-preset','p2' if quality=='speed' else 'p6')
+        _put_option(result,'-cq',number)
+    elif codec=='h264_amf':
+        _put_option(result,'-quality','speed' if quality=='speed' else 'quality')
+        _put_option(result,'-qp_i',number);_put_option(result,'-qp_p',number)
+    elif codec=='h264_qsv':
+        _put_option(result,'-preset','veryfast' if quality=='speed' else 'slow')
+        _put_option(result,'-global_quality',number)
+    return result
+
+
+def infer_quality(args):
+    """Retain our named level when a hardware command falls back to the CPU."""
+    for name in ('-cq','-global_quality','-qp_i','-crf'):
+        value=_option(args,name)
+        if value is not None:
+            try:return {19:'quality',23:'speed'}.get(float(value),'balanced')
+            except (ValueError,TypeError):return 'balanced'
+    return 'balanced'
+
+
+def cpu_arguments(args,quality=None):
+    quality=_quality(quality) if quality is not None else infer_quality(args)
+    result=[];i=0;gpu_options={'-preset','-crf','-cq','-rc','-gpu','-surfaces','-forced-idr','-forced_idr','-quality','-qp_i','-qp_p','-global_quality','-look_ahead'}
     while i<len(args):
         if args[i]=='-c:v':result+=['-c:v','libx264'];i+=2
         elif args[i] in gpu_options:i+=2
         elif args[i]=='-pix_fmt':result+=['-pix_fmt','yuv420p'];i+=2
         else:result.append(args[i]);i+=1
-    result[-1:-1]=['-preset','fast','-crf','21'];return result
+    cpu=quality_args(CPU_ARGS,quality)
+    result[-1:-1]=cpu[2:];return result
+
+
+def filter_capabilities(ffmpeg,force=False,runner=None):
+    """Read the installed binary's filter list; no GPU execution is implied."""
+    key=str(ffmpeg);run=runner or _run
+    with LOCK:
+        previous=FILTER_CACHE.get(key)
+        if not force and previous and time.monotonic()-previous[0]<300:return copy.deepcopy(previous[1])
+    result={'filters':{name:False for name in FILTER_NAMES},'listed':False,'runtimeTested':False,
+            'testedAt':time.time(),'processing':'CPU画面处理；GPU开关选择编码器'}
+    if ffmpeg:
+        try:
+            raw=run([str(ffmpeg),'-hide_banner','-nostdin','-filters'])
+            text=raw.decode('utf-8','replace') if isinstance(raw,bytes) else str(raw)
+            available=set(re.findall(r'^\s*[A-Z.]{3}\s+([A-Za-z0-9_]+)\s',text,re.M))
+            result.update(listed=True,filters={name:name in available for name in FILTER_NAMES})
+        except InterruptedError:raise
+        except (OSError,RuntimeError,subprocess.TimeoutExpired) as error:
+            result.update(code='filter_list_failed',detail='未能读取媒体引擎滤镜清单')
+    else:result.update(code='engine_missing',detail='尚未找到 FFmpeg 媒体引擎')
+    with LOCK:FILTER_CACHE[key]=(time.monotonic(),copy.deepcopy(result))
+    return result
+
+
+def probe_filter_chain(ffmpeg,width=320,height=180,force=False,runner=None):
+    """Opt-in, three-frame CUDA upload/resize/download diagnostic.
+
+    This tests only the named resize path. It does not enable the product's
+    hardware decoder or move eq/crop/text filters onto the GPU.
+    """
+    if isinstance(width,bool) or isinstance(height,bool):raise ValueError('滤镜测试尺寸无效')
+    try:w,h=int(width),int(height)
+    except (ValueError,TypeError,OverflowError):raise ValueError('滤镜测试尺寸无效') from None
+    if w!=float(width) or h!=float(height) or not 64<=w<=3840 or not 64<=h<=3840 or w%2 or h%2:raise ValueError('滤镜测试尺寸必须是64至3840之间的偶数')
+    key=(str(ffmpeg),w,h);run=runner or _run
+    with LOCK:
+        previous=CHAIN_CACHE.get(key)
+        if not force and previous and time.monotonic()-previous[0]<60:return copy.deepcopy(previous[1])
+    source_w,source_h=(128,96) if (w,h)!=(128,96) else (64,64)
+    operations=['format=nv12','hwupload_cuda',f'scale_cuda={w}:{h}','hwdownload','format=nv12']
+    result={'available':False,'runtimeTested':False,'autoEnabled':False,'testedAt':time.time(),
+            'width':w,'height':h,'inputWidth':source_w,'inputHeight':source_h,'frames':0,'operations':operations,
+            'scope':'仅测试CUDA上传、缩放及下载，不代表整条制作流程使用GPU'}
+    if ffmpeg:
+        args=[str(ffmpeg),'-hide_banner','-loglevel','error','-nostdin','-f','lavfi','-i',f'color=s={source_w}x{source_h}:r=30',
+              '-frames:v','3','-an','-vf',','.join(operations),'-progress','pipe:1','-f','null','-']
+        try:
+            raw=run(args);frames=re.findall(rb'^frame=(\d+)',raw,re.M)
+            if not frames or int(frames[-1])<3:raise RuntimeError('GPU filter returned no filtered frames')
+            result.update(available=True,runtimeTested=True,frames=int(frames[-1]),code='ready',detail='已通过3帧CUDA缩放测试；正式任务仍沿用兼容滤镜链')
+        except InterruptedError:raise
+        except (OSError,RuntimeError,subprocess.TimeoutExpired) as error:
+            timed=isinstance(error,subprocess.TimeoutExpired)
+            result.update(runtimeTested=True,code='probe_timeout' if timed else 'filter_chain_unavailable',
+                          detail='CUDA滤镜测试超时，正式任务仍使用CPU画面处理' if timed else 'CUDA滤镜链未通过，正式任务仍使用CPU画面处理')
+    else:result.update(code='engine_missing',detail='尚未找到 FFmpeg 媒体引擎')
+    with LOCK:CHAIN_CACHE[key]=(time.monotonic(),copy.deepcopy(result))
+    return result
 
 
 def prepare_arguments(args):

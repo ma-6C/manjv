@@ -1,0 +1,62 @@
+/* Picture workspace: stable controls, deliberate source/processed distinction. */
+#transform-workspace{font-size:14px;line-height:1.65;min-width:0}
+#transform-workspace [hidden]{display:none!important}
+#transform-workspace .tf-notice{padding:12px 16px;border-left:3px solid #b3a6e7;background:#f3f0fb;color:#786d92;margin-bottom:20px;border-radius:0 7px 7px 0;font-size:12px}
+#transform-workspace .tf-card{border:1px solid var(--line);border-radius:12px;padding:23px;background:#fff;margin-bottom:20px;min-width:0}
+#transform-workspace .tf-card-heading{display:flex;gap:12px;justify-content:space-between;align-items:center;margin-bottom:18px;flex-wrap:wrap}
+#transform-workspace h2{font-size:16px;font-weight:650;line-height:1.4;margin:0}
+#transform-workspace h3{font-size:14px;font-weight:600;margin:0 0 12px}
+#transform-workspace .tf-help{font-size:12px;color:var(--muted);line-height:1.8;margin:10px 0 0}
+#transform-workspace .tf-source-fields{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+#transform-workspace .field{margin-bottom:15px}
+#transform-workspace label{font-size:12px;color:#615872}
+#transform-workspace input:not([type=range]):not([type=checkbox]),#transform-workspace select{font-size:14px;min-height:44px;width:100%;min-width:0;border-radius:7px}
+#transform-workspace .button{min-height:44px;font-size:12px;white-space:nowrap}
+#transform-workspace .tf-check{display:flex;gap:9px;align-items:center;line-height:1.7;cursor:pointer}
+#transform-workspace .tf-check input{flex-shrink:0;margin:0;width:16px;height:16px;accent-color:var(--purple)}
+#transform-workspace .tf-main-grid{display:grid;grid-template-columns:minmax(270px,.9fr) minmax(300px,1.1fr);align-items:start;gap:20px}
+#transform-workspace .tf-badge{color:#7c7290;font-size:12px;background:#f4f2f9;border-radius:5px;padding:3px 8px}
+#transform-workspace .tf-source-stage{min-height:200px;background:#171922;border-radius:8px;padding:10px;display:flex;justify-content:center;align-items:center;overflow:hidden}
+#transform-workspace .tf-source-stage>p{color:#c1b9d2;font-size:12px;padding:35px 12px;text-align:center}
+#transform-workspace .tf-source-frame{position:relative;max-width:100%;width:100%;background:#12141c;isolation:isolate;overflow:hidden}
+#transform-workspace #tf-source{display:block;width:100%;height:100%;object-fit:contain}
+#transform-workspace .tf-crop-guide{position:absolute;inset:0;pointer-events:none;overflow:hidden}
+#transform-workspace #tf-crop-box{position:absolute;border:2px solid #b9a5ff;box-shadow:0 0 0 999px #0908107a;max-width:100%;max-height:100%}
+#transform-workspace #tf-crop-box span{position:absolute;top:5px;left:5px;padding:1px 5px;color:#fff;background:#59429bbe;font-size:12px;border-radius:3px}
+#transform-workspace .tf-summary{display:grid;grid-template-columns:1fr 1fr;gap:15px 10px;margin-top:19px;padding-top:18px;border-top:1px solid var(--line)}
+#transform-workspace .tf-summary span{display:block;font-size:12px;color:var(--muted)}
+#transform-workspace .tf-summary strong{display:block;font-size:14px;font-weight:600;color:#564869;margin-top:2px}
+#transform-workspace .tf-summary>p{grid-column:1/-1;color:var(--muted);font-size:12px;margin:0}
+#transform-workspace .tf-save-state{font-size:12px;color:#68846e}
+#transform-workspace .is-error,#transform-workspace .tf-error{color:var(--red)}
+#transform-workspace .tf-error{font-size:12px;margin:10px 0;padding:10px;background:#fff4f4;border-radius:6px;word-break:break-word}
+#transform-workspace .tf-quick-presets{display:flex;gap:7px;flex-wrap:wrap;margin-bottom:20px}
+#transform-workspace .tf-control{margin:0 0 18px}
+#transform-workspace .tf-control>label{display:flex;align-items:center;gap:10px;margin-bottom:7px}
+#transform-workspace .tf-control label small{font-size:12px;font-weight:400;color:var(--muted)}
+#transform-workspace .tf-range{display:grid;grid-template-columns:minmax(0,1fr) 78px;gap:15px;align-items:center}
+#transform-workspace .tf-range input[type=range]{width:100%;min-width:0;cursor:pointer;accent-color:var(--purple);margin:0;min-height:30px}
+#transform-workspace .tf-range input[type=number]{padding:7px 9px}
+#transform-workspace .tf-crop-mode{border-top:1px solid var(--line);padding-top:19px}
+#transform-workspace .tf-edge-grid{display:grid;grid-template-columns:1fr 1fr;gap:0 20px}
+#transform-workspace .tf-edge-grid .tf-range{grid-template-columns:minmax(0,1fr) 68px;gap:7px}
+#transform-workspace .tf-advanced{margin-top:0;color:var(--ink)}
+#transform-workspace .tf-advanced>summary{font-size:14px;font-weight:600;min-height:24px;line-height:24px}
+#transform-workspace .tf-advanced-body{display:grid;grid-template-columns:1fr 1fr;gap:28px;padding-top:23px}
+#transform-workspace .tf-preset-save{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:8px;margin-bottom:12px}
+#transform-workspace .tf-preset-load{display:grid;grid-template-columns:minmax(0,1fr) auto auto;gap:8px}
+#transform-workspace .tf-preview-actions{display:flex;gap:8px;flex-wrap:wrap}
+#transform-workspace #tf-preview-status{font-size:12px;color:var(--muted);margin:0}
+#transform-workspace #tf-preview-status.is-error{color:var(--red)}
+#transform-workspace .tf-stale{padding:10px 13px;border-radius:6px;color:#906d31;background:#fff8e9;font-size:12px;margin-top:15px}
+#transform-workspace .tf-compare-grid{display:grid;grid-template-columns:1fr 1fr;gap:15px;margin-top:20px}
+#transform-workspace .tf-compare-grid h3{margin-bottom:9px}
+#transform-workspace .tf-compare-grid video{display:block;width:100%;height:270px;object-fit:contain;background:#171922;border-radius:7px}
+#transform-workspace .tf-result-links{display:flex;gap:20px;font-size:12px;margin-top:10px}
+#transform-workspace .tf-scope{padding:0 3px 15px}
+#transform-workspace .tf-scope h2{font-size:14px}
+#transform-workspace #tf-scope-summary{font-size:12px;word-break:break-word;color:#665a7a;margin:9px 0}
+#transform-workspace :is(button,input,select,summary):focus-visible{outline:3px solid #c9bdf2;outline-offset:3px}
+@media(max-width:1280px){#transform-workspace .tf-main-grid{grid-template-columns:1fr}#transform-workspace .tf-controls{display:grid;grid-template-columns:1fr 1fr;gap:0 25px}#transform-workspace .tf-source-frame{max-height:none}#transform-workspace .tf-summary{grid-template-columns:repeat(3,1fr)}}
+@media(max-width:760px){#transform-workspace .tf-source-fields,#transform-workspace .tf-advanced-body{grid-template-columns:1fr;gap:0}#transform-workspace .tf-card{padding:18px}#transform-workspace .tf-controls{grid-template-columns:1fr;gap:0}#transform-workspace .tf-advanced-body>div+div{border-top:1px solid var(--line);padding-top:20px;margin-top:20px}#transform-workspace .tf-compare-grid{gap:10px}#transform-workspace .tf-compare-grid video{height:210px}}
+@media(max-width:480px){#transform-workspace .tf-edge-grid{grid-template-columns:1fr;gap:0}#transform-workspace .tf-compare-grid{grid-template-columns:1fr}#transform-workspace .tf-summary{grid-template-columns:1fr 1fr}#transform-workspace .tf-preset-save{grid-template-columns:1fr}#transform-workspace .tf-preset-load{grid-template-columns:1fr auto auto}#transform-workspace .tf-preview-actions{width:100%}#transform-workspace .tf-preview-actions .button{flex:1}}
