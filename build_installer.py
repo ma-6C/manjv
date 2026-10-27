@@ -1,16 +1,42 @@
 """NSIS per-user installation, prerequisite checks, exact-file uninstall."""
 from pathlib import Path
 import subprocess,json,argparse,re,sys
-parser=argparse.ArgumentParser();parser.add_argument('--version',default='v0.5.0');parser.add_argument('--prepare-script',action='store_true',help='Prepare NSIS input only; never emit an unsigned client installer')
-options=parser.parse_args();version=options.version
-if not re.fullmatch(r'v\d+\.\d+\.\d+',version):raise ValueError('版本号无效')
-ROOT=Path(__file__).resolve().parent;DIST=ROOT/'release'/version/'漫剧工坊';OUT=DIST.parent
+ROOT=Path(__file__).resolve().parent
+
 def quote(p):return str(p).replace('$','$$').replace('"','$\\"')
-files=[p for p in DIST.rglob('*') if p.is_file()]
-delete=[]
-for p in files:delete.append('Delete "$INSTDIR\\'+str(p.relative_to(DIST))+'"')
-for p in sorted([p for p in DIST.rglob('*') if p.is_dir()],key=lambda x:len(x.parts),reverse=True):delete.append('RMDir "$INSTDIR\\'+str(p.relative_to(DIST))+'"')
-script=r'''
+
+def prepare_prerequisites(root=ROOT):
+    """Compile the visible, bounded supervisor and verify its pinned payloads."""
+    import hashlib,os
+    root=Path(root);source=root/'PrerequisiteRunner.cs';tools=root/'tmp/distribution-tools'
+    text=source.read_text('utf-8')
+    for constant,name in [('VCHash','VC_redist.x64.exe'),('EdgeHash','MicrosoftEdgeWebView2RuntimeInstallerX64.exe')]:
+        match=re.search(r'const string '+constant+r'="([a-f0-9]{64})"',text)
+        if not match:raise RuntimeError('运行库校验配置缺失：'+constant)
+        path=tools/name
+        with path.open('rb') as stream:actual=hashlib.file_digest(stream,'sha256').hexdigest()
+        if actual!=match.group(1):raise RuntimeError('运行库安装资源哈希不匹配：'+name)
+    compiler=Path(os.environ.get('WINDIR','C:/Windows'))/'Microsoft.NET/Framework64/v4.0.30319/csc.exe'
+    if not compiler.is_file():raise RuntimeError('缺少 .NET Framework 4 x64 C# 编译器')
+    target=tools/'ManjuPrerequisites.exe'
+    subprocess.run([str(compiler),'/nologo','/target:winexe','/platform:x64','/optimize+',
+                    '/reference:System.Windows.Forms.dll','/reference:System.Drawing.dll',
+                    '/reference:System.Web.Extensions.dll','/out:'+str(target),str(source)],check=True,timeout=60)
+    if not target.is_file():raise RuntimeError('环境检查组件编译未生成输出')
+    return target
+
+def render_script(version,root=ROOT):
+    if not re.fullmatch(r'v\d+\.\d+\.\d+',version):raise ValueError('版本号无效')
+    root=Path(root);dist=root/'release'/version/'漫剧工坊';out=dist.parent
+    files=[p for p in dist.rglob('*') if p.is_file()]
+    delete=[]
+    for p in files:delete.append('Delete "$INSTDIR\\'+str(p.relative_to(dist))+'"')
+    for p in sorted([p for p in dist.rglob('*') if p.is_dir()],key=lambda x:len(x.parts),reverse=True):delete.append('RMDir "$INSTDIR\\'+str(p.relative_to(dist))+'"')
+    script=SCRIPT.replace('0.5.0',version[1:])
+    for key,value in {'OUT':out,'ROOT':root,'DIST':dist,'TOOLS':root/'tmp/distribution-tools','DELETE':'\n  '.join(delete)}.items():script=script.replace('@'+key+'@',quote(value) if key!='DELETE' else value)
+    return script
+
+SCRIPT=r'''
 Unicode true
 !include "MUI2.nsh"
 !include "x64.nsh"
@@ -22,6 +48,7 @@ InstallDir "$LOCALAPPDATA\Programs\ManjuStudio"
 InstallDirRegKey HKCU "Software\ManjuStudio" "InstallDir"
 RequestExecutionLevel user
 SetCompressor zlib
+Var PrerequisiteSilent
 VIProductVersion "0.5.0.0"
 VIAddVersionKey /LANG=2052 "ProductName" "漫剧工坊"
 VIAddVersionKey /LANG=2052 "FileDescription" "漫剧工坊 Windows 安装程序"
@@ -50,42 +77,49 @@ Function .onInit
     Abort
   ${EndIf}
   SetShellVarContext current
+  StrCpy $PrerequisiteSilent ""
+  IfSilent 0 +2
+    StrCpy $PrerequisiteSilent "--silent"
 FunctionEnd
 Section "主程序（必需）" SEC_MAIN
   SectionIn RO
   InitPluginsDir
   SetOutPath "$PLUGINSDIR"
-  SetRegView 64
-  ReadRegDWORD $0 HKLM "SOFTWARE\Microsoft\VisualStudio\14.0\VC\Runtimes\x64" "Installed"
-  ReadRegDWORD $2 HKLM "SOFTWARE\Microsoft\VisualStudio\14.0\VC\Runtimes\x64" "Minor"
-  ${If} $0 != 1
-  ${OrIf} $2 < 40
+  File "@TOOLS@\ManjuPrerequisites.exe"
+  DetailPrint "检查已安装的 Visual C++ x64 与 WebView2，已就绪时跳过安装"
+  ExecWait '"$PLUGINSDIR\ManjuPrerequisites.exe" --check-vc --silent' $0
+  ${If} $0 == 10
     File "@TOOLS@\VC_redist.x64.exe"
-    DetailPrint "安装 Microsoft Visual C++ 运行库（可能请求管理员权限）"
-    ExecShellWait "open" "$PLUGINSDIR\VC_redist.x64.exe" "/install /quiet /norestart" SW_HIDE $1
-    ${If} $1 != 0
-    ${AndIf} $1 != 1638
-    ${AndIf} $1 != 3010
-      MessageBox MB_ICONSTOP "Visual C++ 运行库安装失败（$1）。请安装官方 x64 运行库后重试。"
+    DetailPrint "准备 Microsoft Visual C++；可查看安装进度，最长等待10分钟"
+    ExecWait '"$PLUGINSDIR\ManjuPrerequisites.exe" --install-vc "$PLUGINSDIR\VC_redist.x64.exe" $PrerequisiteSilent' $1
+    ${If} $1 == 3010
+      SetRebootFlag true
+      DetailPrint "Visual C++ 已安装；请重启电脑后运行软件"
+    ${ElseIf} $1 != 0
+      MessageBox MB_ICONSTOP "Visual C++ 运行库尚未就绪（$1）。诊断记录：$LOCALAPPDATA\ManjuStudio\install-logs。请处理后重新运行安装包。"
       Abort
     ${EndIf}
+  ${ElseIf} $0 != 0
+    MessageBox MB_ICONSTOP "环境检查失败（$0）。诊断记录：$LOCALAPPDATA\ManjuStudio\install-logs。"
+    Abort
+  ${EndIf}
+  ExecWait '"$PLUGINSDIR\ManjuPrerequisites.exe" --check-webview --silent' $0
+  ${If} $0 == 10
+    File "@TOOLS@\MicrosoftEdgeWebView2RuntimeInstallerX64.exe"
+    DetailPrint "安装 Microsoft WebView2；最长等待10分钟"
+    ExecWait '"$PLUGINSDIR\ManjuPrerequisites.exe" --install-webview "$PLUGINSDIR\MicrosoftEdgeWebView2RuntimeInstallerX64.exe" $PrerequisiteSilent' $1
+    ${If} $1 == 3010
+      SetRebootFlag true
+      DetailPrint "WebView2 已安装；请重启电脑后运行软件"
+    ${ElseIf} $1 != 0
+      MessageBox MB_ICONSTOP "WebView2 尚未就绪（$1）。诊断记录：$LOCALAPPDATA\ManjuStudio\install-logs。请处理后重新运行安装包。"
+      Abort
+    ${EndIf}
+  ${ElseIf} $0 != 0
+    MessageBox MB_ICONSTOP "WebView2 检查失败（$0）。诊断记录：$LOCALAPPDATA\ManjuStudio\install-logs。"
+    Abort
   ${EndIf}
   SetRegView 32
-  ReadRegStr $0 HKLM "SOFTWARE\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}" "pv"
-  ${If} $0 == ""
-    ReadRegStr $0 HKCU "Software\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}" "pv"
-  ${EndIf}
-  ${If} $0 == ""
-  ${OrIf} $0 == "0.0.0.0"
-    File "@TOOLS@\MicrosoftEdgeWebView2RuntimeInstallerX64.exe"
-    DetailPrint "安装 Microsoft WebView2 桌面运行库"
-    ExecWait '"$PLUGINSDIR\MicrosoftEdgeWebView2RuntimeInstallerX64.exe" /silent /install' $1
-    ${If} $1 != 0
-    ${AndIf} $1 != 3010
-      MessageBox MB_ICONSTOP "WebView2 安装失败（$1）。请安装微软官方运行库后重试。"
-      Abort
-    ${EndIf}
-  ${EndIf}
   SetOutPath "$INSTDIR"
   File /r "@DIST@\*"
   WriteUninstaller "$INSTDIR\卸载漫剧工坊.exe"
@@ -129,17 +163,23 @@ Section "Uninstall"
   ; Personal projects, licenses, models and exports are deliberately preserved.
 SectionEnd
 '''
-script=script.replace('0.5.0',version[1:])
-for key,value in {'OUT':OUT,'ROOT':ROOT,'DIST':DIST,'TOOLS':ROOT/'tmp/distribution-tools','DELETE':'\n  '.join(delete)}.items():script=script.replace('@'+key+'@',quote(value) if key!='DELETE' else value)
-path=ROOT/('tmp/manju-setup-'+version+'.nsi');path.write_text(script,'utf-8-sig')
-if options.prepare_script:
-    print('INSTALLER_SCRIPT_PREPARED_ONLY',path);sys.exit(0)
-# The installer must never wrap a preparation bundle that will fail the normal
-# application's integrity gate. Keep verification enabled before NSIS runs.
-import licensing
-previous_frozen=getattr(sys,'frozen',None);sys.frozen=True
-try:licensing.verify_distribution(DIST)
-finally:
-    if previous_frozen is None:del sys.frozen
-    else:sys.frozen=previous_frozen
-subprocess.run([str(ROOT/'tmp/distribution-tools/nsis-3.12/makensis.exe'),'/V3',str(path)],check=True)
+def main():
+    parser=argparse.ArgumentParser();parser.add_argument('--version',default='v0.5.0');parser.add_argument('--prepare-script',action='store_true',help='Prepare NSIS input only; never emit an unsigned client installer')
+    options=parser.parse_args();version=options.version
+    if not re.fullmatch(r'v\d+\.\d+\.\d+',version):raise ValueError('版本号无效')
+    dist=ROOT/'release'/version/'漫剧工坊'
+    if not dist.is_dir():raise RuntimeError('找不到发行目录，请先完成编译与签名')
+    prepare_prerequisites()
+    path=ROOT/('tmp/manju-setup-'+version+'.nsi');path.write_text(render_script(version),'utf-8-sig')
+    if options.prepare_script:
+        print('INSTALLER_SCRIPT_PREPARED_ONLY',path);return
+    # Never wrap a preparation bundle that will fail the application integrity gate.
+    import licensing
+    previous_frozen=getattr(sys,'frozen',None);sys.frozen=True
+    try:licensing.verify_distribution(dist)
+    finally:
+        if previous_frozen is None:del sys.frozen
+        else:sys.frozen=previous_frozen
+    subprocess.run([str(ROOT/'tmp/distribution-tools/nsis-3.12/makensis.exe'),'/V3',str(path)],check=True)
+
+if __name__=='__main__':main()

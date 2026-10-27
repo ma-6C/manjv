@@ -170,8 +170,87 @@ def editor_checks():
               len(adapter.s.STATE['studioFlowTasks']) == 1 and native.call_count == 3 and install.call_count == 1)
 
 
+def export_and_browser_recovery_checks():
+    adapter, workspace, flow, _ = fixture()
+    stage = {'key': 'export', 'operationId': 'f1:export', 'status': 'queued', 'result': {}, 'ref': {}}
+    workspace.fp = 'fp2'
+    blocked = adapter.start(flow, stage, stage['operationId'])
+    stage.update(blocked)
+    check('导出派发前资料改动先等待核对，不创建资料包',
+          blocked['status'] == 'waiting_action' and blocked['reason'] == 'materials' and not workspace.calls)
+    for _ in range(3):
+        adapter.last_poll.clear()
+        result = adapter.poll(flow, stage)
+        stage.update(result)
+    check('资料改动后的普通轮询不会把空任务列表当作导出完成',
+          result['status'] == 'waiting_action' and result['reason'] == 'materials' and not workspace.calls)
+    resumed = adapter.resume(flow, stage, stage['operationId'])
+    stage.update(resumed)
+    adapter.last_poll.clear()
+    completed = adapter.poll(flow, stage)
+    check('本人继续后接受新资料版本并等待实际导出任务完成',
+          resumed['status'] == 'running' and bool(resumed.get('ref', {}).get('ids'))
+          and completed['status'] == 'completed' and bool(completed['result']['tasks'])
+          and flow['stages'][1]['result']['fingerprints'] == {'p1': 'fp2'}
+          and [c[0] for c in workspace.calls] == ['export'])
+    check('缺失全部导出任务引用明确失败，不能完成空资料包',
+          adapter._publish_tasks([])['status'] == 'failed')
+
+    adapter, workspace, flow, _ = fixture()
+    stage = {'key': 'export', 'operationId': 'f1:export', 'status': 'queued', 'result': {}, 'ref': {}}
+    workspace.inspect = lambda pid: {'projectId': pid, 'ready': False, 'title': pid,
+                                     'errors': ['封面已丢失'], 'fingerprint': 'missing-cover'}
+    blocked = adapter.start(flow, stage, stage['operationId'])
+    stage.update(blocked)
+    adapter.last_poll.clear()
+    polled = adapter.poll(flow, stage)
+    check('导出时附件缺失在派发和后续轮询都保持资料门禁',
+          blocked['status'] == polled['status'] == 'waiting_action'
+          and polled['reason'] == 'materials' and not workspace.calls)
+
+    adapter, workspace, flow, _ = fixture()
+    old = task(workspace, 'export', state={'directory': 'old-version-packet'})
+    stage = {'key': 'export', 'operationId': 'f1:export', 'status': 'running',
+             'ref': {'ids': [old['id']]}, 'result': {}}
+    workspace.fp = 'fp2'
+    polled = adapter.poll(flow, stage)
+    check('旧版本资料包即使已完成也不能越过新资料版本核对',
+          polled['status'] == 'waiting_action' and polled['reason'] == 'materials' and not workspace.calls)
+
+    adapter, workspace, flow, _ = fixture()
+    flow['projectIds'].append('p2')
+    flow['stages'][1]['result']['fingerprints']['p2'] = 'fp1'
+    workspace.inspect = lambda pid: {'projectId': pid, 'ready': pid == 'p1', 'title': pid,
+                                     'errors': [] if pid == 'p1' else ['第二部缺少封面'], 'fingerprint': 'fp1'}
+    missing = adapter._material_version(flow)
+    check('多剧资料缺项聚焦实际缺项剧目，避免一直显示第一部',
+          missing['result']['projectId'] == 'p2' and missing['result']['missing'][0]['projectId'] == 'p2')
+    workspace.inspect = lambda pid: {'projectId': pid, 'ready': True, 'title': pid,
+                                     'errors': [], 'fingerprint': 'fp2' if pid == 'p2' else 'fp1'}
+    changed = adapter._material_version(flow)
+    check('多剧资料变更聚焦实际改动版本',
+          changed['result']['projectId'] == 'p2' and changed['result']['changedProjectIds'] == ['p2'])
+
+    for state in ('failed', 'interrupted'):
+        adapter, workspace, flow, stage = fixture()
+        task(workspace, 'open', status=state)
+        results = [adapter._browser(flow, stage, stage['operationId']) for _ in range(3)]
+        check('后台打开中断不在普通轮询重复打开：'+state,
+              all(r['status'] == 'failed' for r in results) and not workspace.calls)
+        resumed = adapter.resume(flow, stage, stage['operationId'])
+        check('本人恢复只重试打开官方后台，不辅助填写：'+state,
+              resumed['status'] == 'running' and [c[0] for c in workspace.calls] == ['open']
+              and workspace.calls[0][2] is True)
+        for _ in range(3):
+            adapter._browser(flow, stage, stage['operationId'])
+        check('恢复后的后续轮询复用打开结果并等待扫码：'+state,
+              [c[0] for c in workspace.calls].count('open') == 1
+              and not any(c[0] == 'assist' for c in workspace.calls))
+
+
 def run():
     editor_checks()
+    export_and_browser_recovery_checks()
     adapter, workspace, flow, stage = fixture()
     first = adapter._browser(flow, stage, stage['operationId'])
     check('首次发布准备只打开官方后台，不直接填表', first['status'] == 'running' and [c[0] for c in workspace.calls] == ['open'])

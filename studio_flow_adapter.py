@@ -209,10 +209,12 @@ class Adapter:
         fingerprints={p['projectId']:p['fingerprint'] for p in plans}
         old=self._stage(flow,'materials')['result']
         if any(not p['ready'] for p in plans):
-            return dict(status='waiting_action',reason='materials',route='publish',message='发布资料有缺项，请补齐后继续：'+'；'.join(e for p in plans for e in p['errors'][:2]))
+            missing=[{'projectId':p['projectId'],'errors':p['errors']} for p in plans if not p['ready']]
+            return dict(status='waiting_action',reason='materials',route='publish',message='发布资料有缺项，请补齐后继续：'+'；'.join(e for p in plans for e in p['errors'][:2]),result={'projectId':missing[0]['projectId'],'missing':missing})
         if fingerprints!=old.get('fingerprints'):
             if not accept:
-                return dict(status='waiting_action',reason='materials',route='publish',message='发布资料在检查后发生变化，请核对新版本，再点检查并继续。已完成的视频不重做。')
+                changed=[pid for pid,fp in fingerprints.items() if fp!=(old.get('fingerprints') or {}).get(pid)]
+                return dict(status='waiting_action',reason='materials',route='publish',message='发布资料在检查后发生变化，请核对新版本，再点检查并继续。已完成的视频不重做。',result={'projectId':changed[0] if changed else flow['projectIds'][0],'changedProjectIds':changed})
             update={'fingerprints':fingerprints,'revision':int(old.get('revision',0))+1}
             old.update(update)
             with self.s.LOCK:
@@ -232,6 +234,7 @@ class Adapter:
         return ids
 
     def _publish_tasks(self, ids):
+        if not ids:return dict(status='failed', reason='export_missing', message='尚未创建发布资料导出任务，请检查资料后继续')
         tasks = self.s.publish_workspace().public()['tasks']; selected = [next((t for t in tasks if t['id'] == tid), None) for tid in ids]
         if any(t is None for t in selected):return dict(status='failed', message='发布准备任务记录缺失')
         if any(t['status'] in ('failed','interrupted') for t in selected):
@@ -269,7 +272,7 @@ class Adapter:
         if key == 'publish':return self._browser(flow, stage, operation, first=True)
         raise ValueError('流程步骤无效')
 
-    def _browser(self, flow, stage, operation, first=False):
+    def _browser(self, flow, stage, operation, first=False, *, retry_open=False):
         s = self.s; self._outputs(flow); aid = flow['options']['accountId']; pid = flow['projectIds'][0]
         changed=self._material_version(flow)
         if changed:return changed
@@ -297,7 +300,11 @@ class Adapter:
             task=workspace.browser(aid,'open',pid,operation_id=tag+':open')
             return dict(status='running',ref={'kind':'publish_task','id':task['taskId']},message='自动打开账号的官方后台',result={'projectId':pid,'submitted':False})
         if previous['status'] in ('queued','running'):return pending(previous,'正在打开并检测官方发布页面')
-        if previous['status'] in ('failed','interrupted'):return dict(status='failed',message=previous.get('error') or '官方后台打开中断，请核对后恢复流程')
+        if previous['status'] in ('failed','interrupted'):
+            if retry_open:
+                task=workspace.browser(aid,'open',pid,operation_id=tag+':open',retry=True)
+                return dict(status='running',ref={'kind':'publish_task','id':task['taskId']},message='重新打开中断的官方后台，随后核对登录与提审页面',result={'projectId':pid,'submitted':False})
+            return dict(status='failed',message=previous.get('error') or '官方后台打开中断，请核对后恢复流程')
         assisted=find(':assist')
         if assisted:
             if assisted['status'] in ('queued','running'):return pending(assisted,'正在辅助填写本次已核对的发布资料')
@@ -366,7 +373,11 @@ class Adapter:
         self.last_poll[stamp]=now
         if key=='evidence':return self._evidence(flow)
         if key=='materials':return self._materials(flow)
-        if key=='export':return self._publish_tasks(ref.get('ids', []))
+        if key=='export':
+            self._outputs(flow)
+            changed=self._material_version(flow)
+            if changed:return changed
+            return self._publish_tasks(ref.get('ids', []))
         if key=='publish':return self._browser(flow,stage,stage['operationId'])
         return dict(status='waiting_action',reason='review',message='请检查成片后确认继续')
 
@@ -406,7 +417,7 @@ class Adapter:
             # _browser resolves only the current remaining drama and revision;
             # an old no-fill task cannot hijack another drama's recovery.
             stage.setdefault('result',{})['retryNoFill']=True
-            result=self._browser(flow,stage,operation)
+            result=self._browser(flow,stage,operation,retry_open=True)
             result.setdefault('result',{}).setdefault('retryNoFill',True)
             return result
         return self.poll(flow,stage)
