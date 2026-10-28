@@ -1,6 +1,6 @@
 # 漫剧工坊
 
-Windows 本地视频制作工作台。最新本地交付为 **0.9.1**，用于已有剧集的素材导入、选集下载、字幕处理、重组分集、封面与剪映工程制作。发行内容和验收边界见 [0.9.1 交付说明](docs/release-0.9.1.md)。
+Windows 本地视频制作工作台。最新本地交付为 **0.9.2**，用于已有剧集的素材导入、选集下载、字幕处理、重组分集、封面与剪映工程制作。发行内容和构建边界见 [0.9.2 交付说明](docs/release-0.9.2.md)。
 
 本仓库存放主程序源码、测试与构建脚本。安装包、独立离线 AI 引擎、运行环境、用户工程、账号登录态和发行私钥在本地单独保存。
 
@@ -12,6 +12,8 @@ Windows 本地视频制作工作台。最新本地交付为 **0.9.1**，用于�
 - [`design/start-work` 分支](https://github.com/ma-6C/manjv/tree/design/start-work)：独立的五阶段引导流程原型，使用示例数据，尚未接入正式处理服务。
 
 0.9.1 已将字幕输出校验、错误诊断、原生文件选择和 AI 去字幕页面设置改进打入新安装包。2026-10-27 的主分支同步与旧分支清理范围见[分支整理记录](docs/branch-cleanup-20261027.md)。
+
+0.9.2 新增 STTN 独立设备选择、CUDA 兼容性错误的原始诊断及新进程 CPU 回退。RTX 50 系列另提供 cu128 v2 引擎包；按用户要求，本轮未运行功能或模型验收测试。
 
 现有工作台支持“开始连续制作”和“仅合并切分”。连续制作依次执行已开启的 AI 文案、源片字幕修复、画面处理与分集、高光包装、封面、制作记录、成本报告。字幕处理先于重组；已完成的单步合并任务可复用分集继续后续步骤，避免重复编码。
 
@@ -52,6 +54,7 @@ Windows 本地视频制作工作台。最新本地交付为 **0.9.1**，用于�
 | `versions/v0.8.6/` | 46项构建输入SHA256与本次验收摘要 |
 | `versions/v0.9.0/` | 85项构建输入SHA256与0.9.0发行验收摘要 |
 | `versions/v0.9.1/` | 90项构建输入SHA256与0.9.1发行验收摘要 |
+| `versions/v0.9.2/` | 90项构建输入SHA256与0.9.2构建记录，含未运行测试的边界 |
 | `test_*.py`、`verify_*.py`、`ui-*.cjs` | 隔离检查与界面验收脚本 |
 | `tools/` | 构建输入核对与源码上传检查 |
 
@@ -69,13 +72,13 @@ python -m venv .venv
 
 红果原生功能需要本地`engines/guoapp-core/duanju_core.dll`，其版本和SHA256记录在同目录`manifest.json`。该第三方组件二进制、本地参考工程与Go构建工具不上传本仓库；由组件分发或维护者的参考源码准备，并核对哈希。仅克隆主仓库不等于已经安装所有外置引擎。
 
-本地AI去字幕还需要独立v1引擎包或已配置的video-subtitle-remover环境；本仓库不含模型权重。已有有效引擎可继续使用。
+本地AI去字幕还需要独立引擎包或已配置的video-subtitle-remover环境；本仓库不含模型权重。v1 为 cu126，针对 RTX 50 系列另提供 cu128 v2 包；两个包导入到各自独立目录，保留签名和模型许可。
 
 ## 检查与构建
 
 ```powershell
 python tools/verify_build_inputs.py --version v0.8.6
-python tools/record_release_inputs.py --version v0.9.1 --verify
+python tools/record_release_inputs.py --version v0.9.2 --verify
 python tools/audit_repository.py
 ```
 

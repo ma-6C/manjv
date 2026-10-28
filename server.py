@@ -100,7 +100,7 @@ DEFAULT = {
     'endingText': '', 'costTemplate': '', 'costRows': [
         {'name': '演员报酬', 'amount': 0}, {'name': '制作与剪辑', 'amount': 0},
         {'name': 'AI服务', 'amount': 0}, {'name': '音乐与素材授权', 'amount': 0}, {'name': '其他', 'amount': 0}],
-    'vsrRoot': '', 'vsrPython': '' if getattr(sys,'frozen',False) else sys.executable, 'vsrMode': 'sttn-auto', 'vsrReuseWorker':True, 'lamaDevice':'auto',
+    'vsrRoot': '', 'vsrPython': '' if getattr(sys,'frozen',False) else sys.executable, 'vsrMode': 'sttn-auto', 'vsrReuseWorker':True, 'sttnDevice':'auto', 'lamaDevice':'auto',
     'sauRoot': str(ROOT/'engines'/'social-auto-upload'), 'sauPython': sys.executable,
     'uploadMode': 'draft', 'uploadSchedule': '',
 }
@@ -242,6 +242,7 @@ def validate_config(c):
     if c['subtitleMode'] not in ['local','cloud','vsr']:raise ValueError('字幕模式无效')
     if c['vsrMode'] not in ['sttn-auto','lama-box','sttn','sttn-det','lama','propainter']:raise ValueError('本地修复引擎无效')
     if c['lamaDevice'] not in ['auto','cpu']:raise ValueError('LaMa 推理设备无效')
+    if c['sttnDevice'] not in ['auto','cpu']:raise ValueError('STTN 推理设备无效')
     if c['uploadMode'] not in ['draft','now','scheduled']:raise ValueError('上传模式无效')
     for key, lo, hi in [('segmentSeconds', 1, 3600), ('width', 64, 3840), ('height', 64, 3840),
                         ('parallel', 1, 8), ('brightness', -.2, .2), ('contrast', .8, 1.3),
@@ -1088,13 +1089,19 @@ def vsr_subtitle(p,cfg,job):
             def detach(proc):
                 with LOCK:JOBS[job]['processes'].discard(proc)
             pool=lama_local.POOL if cfg['vsrMode']=='lama-box' else vsr_pool.POOL
-            stats=pool.run(runtime,root,{'input':v['path'],'output':str(target),'mode':cfg['vsrMode'],'regions':coords,'duration':v['duration'],'device':cfg.get('lamaDevice','auto'),'ffmpeg':FFMPEG},JOBS[job]['cancel'],
-                observe=lambda line:telemetry.vsr_event(JOBS[job],tid,line),heartbeat=lambda:telemetry.heartbeat(JOBS[job],tid),attach=attach,detach=detach)
+            def cpu_fallback(reason):
+                log('STTN 显卡与当前引擎不兼容，已自动改用 CPU，重新处理当前视频（耗时会增加）：'+reason,level='warning',job=job)
+                stage(job,'STTN 改用 CPU 重新修复：'+v['name'],10+i/len(videos)*80)
+                telemetry.restart(JOBS[job],tid,'改用 CPU，重新加载字幕修复模型')
+            device_key='lamaDevice' if cfg['vsrMode']=='lama-box' else 'sttnDevice'
+            stats=pool.run(runtime,root,{'input':v['path'],'output':str(target),'mode':cfg['vsrMode'],'regions':coords,'duration':v['duration'],'device':cfg.get(device_key,'auto'),'ffmpeg':FFMPEG},JOBS[job]['cancel'],
+                observe=lambda line:telemetry.vsr_event(JOBS[job],tid,line),heartbeat=lambda:telemetry.heartbeat(JOBS[job],tid),attach=attach,detach=detach,on_fallback=cpu_fallback)
             if not cfg.get('vsrReuseWorker',True):pool.close()
             JOBS[job]['vsrWorker']=stats
             engine_log=stats.pop('engineLog','')
             JOBS[job]['localRepairEngine']=cfg['vsrMode']
-            if stats.get('fallback'):log('LaMa 推理已自动改用 CPU：'+stats['fallback'],level='warning',job=job)
+            if stats.get('fallback') and cfg['vsrMode']=='lama-box':log('LaMa 推理已自动改用 CPU：'+stats['fallback'],level='warning',job=job)
+            log(('STTN' if cfg['vsrMode']=='sttn-auto' else 'LaMa')+' 实际推理设备：'+str(stats.get('device','未记录')),job=job)
             log(('复用常驻模型' if stats['reusedProcess'] else '启动常驻模型')+f'，累计处理 {stats["completedVideos"]} 集，模型加载 {stats["modelLoads"]} 次',job=job)
         else:
             vsr_pool.POOL.close()

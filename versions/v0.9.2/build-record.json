@@ -1,0 +1,30 @@
+{
+  "version": "0.9.2",
+  "date": "2026-10-28",
+  "installer": "漫剧工坊-安装程序-0.9.2.exe",
+  "bytes": 402978238,
+  "sha256": "f1cc259b1e949e35c1efc1a199d5f55383dfc9c5831377eba587e65c90713ec3",
+  "compiledModules": 33,
+  "signedFiles": 1046,
+  "recordedBuildInputs": 90,
+  "applicationIntegritySigned": true,
+  "installerConstructed": true,
+  "runtimeTestsRun": false,
+  "modelTestsRun": false,
+  "browserTestsRun": false,
+  "installerExecutionTested": false,
+  "customerHardwareTested": false,
+  "testsSkippedAtUserRequest": true,
+  "externalPlatformSubmitted": false,
+  "oldV1ArchiveUnchanged": true,
+  "engineV2": {
+    "engine": "vsr-1.4.0-sttn-cu128",
+    "file": "漫剧工坊-AI离线引擎-v2-cu128.zip",
+    "bytes": 4765639838,
+    "sha256": "9b369e10e505262fd9730044cfe93697ee95e5fd29c19baea847a1c086e53ddb",
+    "unpackedBytes": 7989124344,
+    "signedFiles": 22371,
+    "modelRuntimeTested": false,
+    "customerHardwareTested": false
+  }
+}

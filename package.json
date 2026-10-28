@@ -1,6 +1,6 @@
 {
   "name": "manju-studio",
-  "version": "0.9.1",
+  "version": "0.9.2",
   "private": true,
   "scripts": { "start": "powershell -ExecutionPolicy Bypass -File ./启动.ps1" }
 }

@@ -5,6 +5,7 @@ import json,os,queue,subprocess,threading,time,uuid
 STRICT_IO_SOURCE=r'''
 import subprocess,tempfile,math,os
 APP_FFMPEG=''
+PROCESSING_ERROR=None
 class CheckedVideoWriter:
  def __init__(self,path,*args):
   fps,size=args if len(args)==2 else args[1:]
@@ -38,6 +39,9 @@ class CheckedVideoWriter:
    try:code=self.process.wait(timeout=600)
    except subprocess.TimeoutExpired:
     self.process.kill();self.process.wait(timeout=5);raise RuntimeError('STTN video encoder timed out: '+self.error_text())
+   # The v1 STTN loop prints and swallows inference errors before this finally.
+   # Report the first processing error rather than its secondary empty output.
+   if PROCESSING_ERROR is not None:raise PROCESSING_ERROR
    if code:raise RuntimeError(f'STTN video encoder failed; exit code {code}: '+self.error_text())
    if self.frames<=0:raise RuntimeError('STTN video encoder received no frames')
   except Exception as error:self.failure=error;raise
@@ -66,7 +70,7 @@ def checked_merge_audio(sr):
 '''
 
 WORKER_SOURCE=STRICT_IO_SOURCE+r'''
-import sys,json,os,gc,traceback
+import sys,json,os,gc,traceback,builtins
 from pathlib import Path
 sys.dont_write_bytecode=True
 out=sys.stdout
@@ -81,6 +85,16 @@ try:
  from backend.tools.constant import InpaintMode
  import backend.inpaint.sttn_auto_inpaint as sttn
  import torch
+ # Preserve exceptions swallowed by the signed v1 inference loop without
+ # modifying any engine source or model on disk.
+ def sttn_print(*args,**kwargs):
+  global PROCESSING_ERROR
+  error=sys.exc_info()[1]
+  if error is not None and args and str(args[0]).startswith('Error during video processing:'):
+   PROCESSING_ERROR=error
+   traceback.print_exception(type(error),error,error.__traceback__,file=sys.stderr)
+  builtins.print(*args,**kwargs)
+ sttn.print=sttn_print
  # Apply only inside this child process; the signed engine files stay intact.
  class CVProxy:
   def __getattr__(self,name):return CheckedVideoWriter if name=='VideoWriter' else getattr(original_cv,name)
@@ -104,24 +118,35 @@ for line in sys.stdin:
  try:
   if request.get('mode')!='sttn-auto':raise ValueError('Persistent worker supports STTN-auto only')
   APP_FFMPEG=request.get('ffmpeg','')
+  PROCESSING_ERROR=None
   if not APP_FFMPEG or not Path(APP_FFMPEG).is_file():raise ValueError('STTN requires the application FFmpeg executable')
+  if request.get('device','auto') not in ('auto','cpu'):raise ValueError('Invalid STTN inference device')
+  if request.get('device')=='cpu':torch.set_num_threads(min(4,os.cpu_count() or 2))
+  config.hardwareAcceleration.value=request.get('device','auto')!='cpu'
   config.inpaintMode.value=InpaintMode.STTN_AUTO
   sr=SubtitleRemover(request['input'])
+  device=str(sr.hardware_accelerator.device)
+  print(f'STTN inference device: {device}; PyTorch {torch.__version__}; CUDA build {torch.version.cuda}',file=sys.stderr,flush=True)
+  if device.startswith('cuda'):
+   print(f'STTN GPU: {torch.cuda.get_device_name()}; capability {torch.cuda.get_device_capability()}; compiled architectures {torch.cuda.get_arch_list()}',file=sys.stderr,flush=True)
   if not sr.video_cap.isOpened() or sr.frame_count<=0:raise ValueError('VSR cannot open input video')
   sr.sub_areas=request['regions'];sr.video_out_path=request['output'];sr.run()
   if not sr.isFinished:raise RuntimeError('VSR did not finish the whole video')
   completed+=1
-  emit({'event':'result','id':request['id'],'ok':True,'pid':os.getpid(),'modelLoads':loads,'modelCacheHits':hits,'completedVideos':completed})
+  emit({'event':'result','id':request['id'],'ok':True,'pid':os.getpid(),'device':device,'modelLoads':loads,'modelCacheHits':hits,'completedVideos':completed})
  except Exception as error:
   print(traceback.format_exc(),file=sys.stderr)
   models.clear();gc.collect()
-  if torch.cuda.is_available():torch.cuda.empty_cache()
+  # CUDA failures can poison the context. Cleanup must not hide the first error.
+  try:
+   if torch.cuda.is_available():torch.cuda.empty_cache()
+  except Exception:pass
   emit({'event':'result','id':request.get('id'),'ok':False,'error':str(error),'detail':traceback.format_exc()})
  finally:
   if sr is not None:
    try:sr.video_cap.release();sr.video_writer.dispose();sr.video_temp_file.close()
    except Exception:pass
-  sr=None;gc.collect()
+  sr=None;PROCESSING_ERROR=None;gc.collect()
 '''
 
 class WorkerError(RuntimeError):
@@ -129,12 +154,23 @@ class WorkerError(RuntimeError):
         self.details=details or message;self.tool='本地 AI 工作进程';self.exit_code=exit_code
         super().__init__(message)
 
+CUDA_COMPATIBILITY_MARKERS=('no kernel image is available','invalid device function','not compatible with the current pytorch','cuda driver version is insufficient')
+
+def cuda_compatibility_reason(error):
+    for line in (str(error)+'\n'+getattr(error,'details','')).splitlines():
+        if any(marker in line.lower() for marker in CUDA_COMPATIBILITY_MARKERS):return line.strip()[:1500]
+    return ''
+
 class Client:
-    def __init__(self,runtime,root,worker_source=None):
+    def __init__(self,runtime,root,worker_source=None,cpu_only=False):
         self.messages=queue.Queue();self.observe=None;self.tail='';self.closed=False
+        env=os.environ|{'PYTHONIOENCODING':'utf-8','PYTHONUNBUFFERED':'1'}
+        # Hide CUDA before importing torch in a fresh process. A GPU that just
+        # failed must not supply tensors or a poisoned context to the CPU retry.
+        if cpu_only:env['CUDA_VISIBLE_DEVICES']=''
         self.process=subprocess.Popen([str(runtime),'-u','-c',worker_source if worker_source is not None else WORKER_SOURCE,str(root)],cwd=root,
             stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE,
-            env=os.environ|{'PYTHONIOENCODING':'utf-8','PYTHONUNBUFFERED':'1'},creationflags=getattr(subprocess,'CREATE_NO_WINDOW',0))
+            env=env,creationflags=getattr(subprocess,'CREATE_NO_WINDOW',0))
         def protocol():
             try:
                 for line in self.process.stdout:
@@ -176,7 +212,7 @@ class Client:
             except (OSError,ValueError):pass
 
 class Pool:
-    def __init__(self,idle_seconds=120,worker_source=None,model_file='backend/models/sttn-auto/infer_model.pth'):self.lock=threading.RLock();self.client=None;self.signature=None;self.timer=None;self.idle_seconds=idle_seconds;self.worker_source=worker_source;self.model_file=model_file
+    def __init__(self,idle_seconds=120,worker_source=None,model_file='backend/models/sttn-auto/infer_model.pth'):self.lock=threading.RLock();self.client=None;self.signature=None;self.timer=None;self.idle_seconds=idle_seconds;self.worker_source=worker_source;self.model_file=model_file;self.cuda_failure=None
     def fingerprint(self,runtime,root):
         # Watch only this worker's model. The upstream VSR initializer can merge
         # other model shards; those writes must not restart an unrelated worker.
@@ -187,11 +223,40 @@ class Pool:
             if self.timer:self.timer.cancel();self.timer=None
             if self.client:self.client.close();self.client=None
             self.signature=None
-    def run(self,runtime,root,request,cancel,observe=lambda line:None,heartbeat=lambda:None,attach=lambda p:None,detach=lambda p:None):
+    def run(self,runtime,root,request,cancel,observe=lambda line:None,heartbeat=lambda:None,attach=lambda p:None,detach=lambda p:None,on_fallback=lambda reason:None):
         with self.lock:
+            # LaMa/custom workers retain their own device and retry policies.
+            if self.worker_source is not None:
+                return self._run_once(runtime,root,request,cancel,observe,heartbeat,attach,detach)
+            requested=request.get('device','auto')
+            if requested not in ('auto','cpu'):raise ValueError('STTN 推理设备无效')
+            fingerprint=self.fingerprint(runtime,root)
+            fallback=self.cuda_failure[1] if requested=='auto' and self.cuda_failure and self.cuda_failure[0]==fingerprint else ''
+            if requested=='cpu' or fallback:
+                if cancel.is_set():raise InterruptedError('已暂停本地AI，未启动 CPU 重试')
+                if fallback:on_fallback(fallback)
+                result=self._run_once(runtime,root,request|{'device':'cpu'},cancel,observe,heartbeat,attach,detach,cpu_only=True)
+                if fallback:result['fallback']=fallback
+                return result
+            try:
+                return self._run_once(runtime,root,request,cancel,observe,heartbeat,attach,detach)
+            except WorkerError as error:
+                reason=cuda_compatibility_reason(error)
+                if not reason or cancel.is_set():raise
+                # The failed worker is already closed by _run_once. Retry just
+                # this video once on CPU, remembering the incompatible runtime.
+                self.cuda_failure=(fingerprint,reason)
+                on_fallback(reason)
+                result=self._run_once(runtime,root,request|{'device':'cpu'},cancel,observe,heartbeat,attach,detach,cpu_only=True)
+                result['fallback']=reason
+                return result
+
+    def _run_once(self,runtime,root,request,cancel,observe,heartbeat,attach,detach,cpu_only=False):
+        with self.lock:
+            if cancel.is_set():raise InterruptedError('已暂停本地AI，未启动新的工作进程')
             if self.timer:self.timer.cancel();self.timer=None
-            signature=self.fingerprint(runtime,root);cold=not self.client or self.signature!=signature or self.client.process.poll() is not None
-            if cold:self.close();self.client=Client(runtime,root,self.worker_source);self.signature=signature
+            signature=(self.fingerprint(runtime,root),cpu_only);cold=not self.client or self.signature!=signature or self.client.process.poll() is not None
+            if cold:self.close();self.client=Client(runtime,root,self.worker_source,cpu_only=cpu_only);self.signature=signature
             client=self.client;client.observe=observe;attach(client.process)
             try:
                 if cold:

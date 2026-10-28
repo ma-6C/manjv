@@ -49,6 +49,7 @@ InstallDirRegKey HKCU "Software\ManjuStudio" "InstallDir"
 RequestExecutionLevel user
 SetCompressor zlib
 Var PrerequisiteSilent
+Var AIEngineArchive
 VIProductVersion "0.5.0.0"
 VIAddVersionKey /LANG=2052 "ProductName" "漫剧工坊"
 VIAddVersionKey /LANG=2052 "FileDescription" "漫剧工坊 Windows 安装程序"
@@ -135,11 +136,15 @@ Section "主程序（必需）" SEC_MAIN
   CreateShortcut "$SMPROGRAMS\漫剧工坊\卸载.lnk" "$INSTDIR\卸载漫剧工坊.exe"
   CreateShortcut "$DESKTOP\漫剧工坊.lnk" "$INSTDIR\漫剧工坊.exe"
 SectionEnd
-Section /o "可选：导入同目录的离线 AI 引擎包（约 8 GB）" SEC_AI
-  IfFileExists "$EXEDIR\漫剧工坊-AI离线引擎-v1.zip" found missing
+Section /o "可选：导入同目录的离线 AI 引擎包" SEC_AI
+  StrCpy $AIEngineArchive "$EXEDIR\漫剧工坊-AI离线引擎-v2-cu128.zip"
+  IfFileExists "$AIEngineArchive" found try_v1
+  try_v1:
+    StrCpy $AIEngineArchive "$EXEDIR\漫剧工坊-AI离线引擎-v1.zip"
+    IfFileExists "$AIEngineArchive" found missing
   found:
     DetailPrint "校验签名并导入离线 AI 引擎，请稍候…"
-    ExecWait '"$INSTDIR\漫剧工坊.exe" --install-engine "$EXEDIR\漫剧工坊-AI离线引擎-v1.zip"' $0
+    ExecWait '"$INSTDIR\漫剧工坊.exe" --install-engine "$AIEngineArchive"' $0
     ${If} $0 != 0
       MessageBox MB_ICONEXCLAMATION "离线 AI 引擎导入未完成。可在软件的“授权与组件”中重试。"
     ${EndIf}

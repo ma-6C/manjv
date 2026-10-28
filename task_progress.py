@@ -50,6 +50,7 @@ def failure(job,error,redact=safe_text,trace=''):
     text=(raw+'\n'+detail).lower()
     code,action='TASK_FAILED','根据下方原始报错核对当前步骤；修正后重试未完成部分。'
     rules=[
+        ('CUDA_COMPATIBILITY',('no kernel image is available','invalid device function','not compatible with the current pytorch','cuda driver version is insufficient'),'当前显卡与引擎的 PyTorch/CUDA 不兼容。在 AI 去字幕设置中将 STTN 推理设备改为 CPU；使用 GPU 需要匹配显卡型号的运行环境。'),
         ('DISK_SPACE',('no space left','disk full','errno 28','磁盘空间不足','not enough space'),'清理输出磁盘，或在制作设置中更换输出目录，再重试未完成部分。'),
         ('MEMORY',('out of memory','cuda out of memory','cannot allocate memory','显存不足'),'降低并行数或修复批次大小；显存不足时可切换 CPU，再重试当前视频。'),
         ('FILE_MISSING',('no such file','filenotfounderror','系统找不到指定的文件','文件不存在','素材已修改或移动'),'核对下方文件名和路径，恢复缺失文件或重新选择素材。'),
@@ -66,15 +67,18 @@ def failure(job,error,redact=safe_text,trace=''):
         if any(needle in text for needle in needles):code,action=key,hint;break
     if isinstance(error,ProcessFailure) and error.timed_out:
         code,action='PROCESS_TIMEOUT','当前外部程序超过等待上限。核对原始输出和运行环境后重试当前步骤。'
-    summary={'DISK_SPACE':'输出磁盘空间不足。','MEMORY':'处理引擎报告内存或显存不足。','FILE_MISSING':'处理所需的文件或目录不存在。',
+    summary={'CUDA_COMPATIBILITY':'当前显卡与 AI 引擎的 PyTorch/CUDA 不兼容。','DISK_SPACE':'输出磁盘空间不足。','MEMORY':'处理引擎报告内存或显存不足。','FILE_MISSING':'处理所需的文件或目录不存在。',
         'PERMISSION':'处理程序没有文件访问权限。','DEPENDENCY':'引擎缺少模块或运行库。','AUTH':'接口认证未通过。',
         'FILTER':'媒体滤镜未能初始化。','ENCODER':'视频编码器未能正常启动。','PARAMETER':'媒体命令中的参数未被接受。','NETWORK':'连接或服务响应异常。',
         'PROCESS_TIMEOUT':'外部处理程序超过等待上限。','MEDIA_OUTPUT':'生成的视频不完整或无法正常解码。'}.get(code,'当前步骤执行失败，原始报错如下。')
     t=snapshot(job);row=t.get('current') or {}
     stage=job.get('stage')
     if not stage or stage=='任务失败':stage=t.get('phase') or row.get('label') or '未记录失败阶段'
+    reason=(error_excerpt(detail) or error_excerpt(raw)) if isinstance(error,ProcessFailure) else error_excerpt(raw)
+    if code=='CUDA_COMPATIBILITY':
+        reason=next((line.strip() for line in (raw+'\n'+detail).splitlines() if any(marker in line.lower() for marker in rules[0][1])),reason)
     return {'code':code,'stage':stage,'video':getattr(error,'video','') or row.get('name',''),'project':job.get('project',''),
-            'summary':summary,'reason':(error_excerpt(detail) or error_excerpt(raw)) if isinstance(error,ProcessFailure) else error_excerpt(raw),'nextStep':action,'exceptionType':type(error).__name__,
+            'summary':summary,'reason':reason,'nextStep':action,'exceptionType':type(error).__name__,
             'tool':getattr(error,'tool',''),'exitCode':getattr(error,'exit_code',None),
             'details':detail,'traceback':safe_text(redact(trace))[-12000:],'time':time.strftime('%Y-%m-%d %H:%M:%S')}
 
@@ -141,6 +145,15 @@ def advance(job,tid,completed,total=None):
             rate=(samples[-1][1]-samples[0][1])/(samples[-1][0]-samples[0][0])
             row['speed']=round(rate,3) if rate>0 else None
             row['etaSeconds']=round(max(0,row['total']-value)/rate) if row['total'] and rate>0 else None
+
+def restart(job,tid,label):
+    """A device retry starts this video's frame count and speed samples again."""
+    with LOCK:
+        row=_row(job,tid)
+        if row:row.update(status='running',label=label,completed=0,percent=0,etaSeconds=None,speed=None,progressAt=time.time())
+        sampler=SAMPLERS.get(tid)
+        if sampler:sampler['samples'].clear()
+        phase(job,label)
 
 def finalizing(job,tid,label='校验输出'):
     with LOCK:
