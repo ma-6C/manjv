@@ -1,7 +1,7 @@
 {
-  "version": "0.2.66+73",
+  "version": "0.2.67+74-manju.1",
   "sourceCommit": "0e60928514c31a96ade9b31866948f15da5ca2a6",
-  "sha256": "21968b7f9aa132224913faf5fbbb03b1117109c07f1f37b2f245510107928192",
+  "sha256": "73569be4058402a09cb7f6c9fa46bf145cad37f4bc87e9ed010460b07b779b8e",
   "source": "https://github.com/zhoufuweigg/guoapp",
   "allSources": false,
   "compatibilityPatch": "https://github.com/Xanerix/guoapp/commit/8454613e9113a59fa2315d54f58e72d914b3ffd9",
@@ -11,5 +11,8 @@
     "rangeThresholdBytes": 8388608,
     "queueWaitExcludedFromTimeout": true,
     "transientResumeRetries": 1
-  }
+  },
+  "playbackCompatibilityPatch": "https://github.com/limbia/guoapp/commit/5fee5b4e93893cfb75ed0df9e1cbb387b334172d",
+  "playbackRequest": "multi_video_model/v1",
+  "playbackVerification": "build-only; live download not verified"
 }

@@ -235,16 +235,30 @@ class ImportManager:
             else:raise ValueError('未知采集操作')
             self.save();return copy.deepcopy(row)
     def cancel(self,jid):return self.control(jid,'cancel')
-    def directory(self,root,meta):
+    def directory(self,root,meta,row=None):
         root=Path(root).resolve();key=str(root).casefold()+'|'+meta['platform']+'|'+meta['seriesId']
         with self.lock:
             saved=self.index.get(key)
             title=re.sub(r'[<>:"/\\|?*\x00-\x1f]','_',meta['title']).strip(' .')[:60] or '漫剧'
-            target=Path(saved) if saved else root/('红果原生' if meta.get('platform')=='guoapp_hongguo' else '红果')/(title+'__'+meta['seriesId'])
-            if not target.resolve().is_relative_to(root):raise ValueError('归档目录超出所选保存位置')
-            if not saved and target.exists():
-                existing=read(target/'剧集资料.json',{})
-                if existing.get('seriesId')!=meta['seriesId'] or existing.get('platform')!=meta['platform']:
+            if not re.fullmatch(r'\d{5,30}',meta['seriesId']):raise ValueError('剧集ID无效，无法确定独立保存目录')
+            platform_dir=(root/('红果原生' if meta.get('platform')=='guoapp_hongguo' else '红果')).resolve()
+            if not platform_dir.is_relative_to(root):raise ValueError('归档目录超出所选保存位置')
+            canonical=platform_dir/(title+'__'+meta['seriesId'])
+            target=Path(saved).resolve() if isinstance(saved,str) and saved else canonical.resolve()
+            if target.parent!=platform_dir or not target.name.endswith('__'+meta['seriesId']):
+                target=canonical.resolve()
+                if row is not None:
+                    warning='旧保存目录映射无效，已改用本剧独立子文件夹；原目录中的视频未移动'
+                    if warning not in row['warnings']:row['warnings'].append(warning)
+            if target.parent!=platform_dir or not target.is_relative_to(root):raise ValueError('归档目录超出本剧独立保存位置')
+            if target.exists():
+                if not target.is_dir():raise ValueError('本剧保存位置已有同名文件，请选择其他保存位置')
+                metadata=target/'剧集资料.json'
+                if metadata.exists():
+                    existing=read(metadata,{})
+                    if not isinstance(existing,dict) or existing.get('seriesId')!=meta['seriesId'] or existing.get('platform')!=meta['platform']:
+                        raise ValueError('本剧保存目录中的资料属于其他剧或已损坏，未写入视频，请核对保存位置')
+                elif any(target.iterdir()):
                     raise ValueError('同名目录已有其他资料，请选择其他保存位置')
             target.mkdir(parents=True,exist_ok=True);self.index[key]=str(target);write(self.index_path,self.index)
             return target
@@ -259,7 +273,7 @@ class ImportManager:
         self.update(row,title=meta['title'])
         if event.is_set():raise self.h.Cancelled()
         meta['importRoot']=str(Path(row['directory']).resolve())
-        directory=self.directory(row['directory'],meta);check_storage(directory);self.update(row,savedDirectory=str(directory))
+        directory=self.directory(row['directory'],meta,row);check_storage(directory);self.update(row,savedDirectory=str(directory))
         records=self.records(directory)
         temporary_dir=directory/'.下载中';temporary_dir.mkdir(exist_ok=True)
         if not temporary_dir.resolve().is_relative_to(directory.resolve()):raise ValueError('临时目录不在素材目录中')
