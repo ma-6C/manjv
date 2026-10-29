@@ -4,7 +4,7 @@ import json,os,shutil,subprocess,threading
 
 LOCK=threading.Lock()
 FILTERS={
- 'folder':None,'editor':('JianyingPro.exe','JianyingPro.exe'),
+ 'folder':None,'editor':('剪映主程序','*.exe'),
  'python':('Python runtime','*.exe'),'engine':('AI engine','*.zip'),
  'template':('Word template','*.docx'),'image':('Images','*.jpg;*.jpeg;*.png;*.webp'),
  'images':('Images','*.jpg;*.jpeg;*.png;*.webp'),
@@ -23,6 +23,8 @@ def specification(body):
 def normalize(selection,spec):
     paths=[selection] if isinstance(selection,str) else list(selection or [])
     if any(not isinstance(p,str) for p in paths):raise ValueError('文件选择窗口返回了无效路径')
+    if spec['mode']=='editor' and paths and Path(paths[0]).name.casefold()!='jianyingpro.exe':
+        raise ValueError('请选择剪映的 JianyingPro.exe 主程序')
     return {'paths':paths} if spec['plural'] else {'path':paths[0] if paths else ''}
 
 def powershell_executable():
