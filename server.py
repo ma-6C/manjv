@@ -584,16 +584,18 @@ def jianying_batch(ids,cfg,jid):
             if progress['phase']==phase and now-progress['last']<.5 and value!=length:return
             if progress['phase']!=phase:
                 if progress['tid']:telemetry.finish(job,progress['tid'])
-                unit='bytes' if phase in ('copy','hash','assets') else 'clips' if phase=='timeline' else 'captions' if phase=='captions' else 'files' if phase in ('audio','draft','cache') else 'frames'
+                unit='bytes' if phase in ('copy','hash','assets') else 'clips' if phase in ('timeline','fragments') else 'captions' if phase=='captions' else 'seconds' if phase=='asr' else 'files' if phase in ('audio','draft','cache','cpu_fallback') else 'frames'
                 progress['tid']=telemetry.begin(job,'剪映工程 · '+phase,video['name'],length or 0,unit)
             progress.update(phase=phase,last=now)
             if isinstance(value,(int,float)) and isinstance(length,(int,float)):telemetry.advance(job,progress['tid'],value,length)
-            stage(jid,f'{index+1}/{len(videos)} · 剪映工程 · {video["name"]} · '+{'copy':'复制素材','audio':'提取原声','draft':'保存草稿','decode':'分析镜头','hash':'核对素材','cache':'复用镜头分析','assets':'复制附加素材','timeline':'建立画面片段与运镜','captions':'建立字幕轨'}.get(phase,'分析视频'),index/len(videos)*90)
+            stage(jid,f'{index+1}/{len(videos)} · 剪映工程 · {video["name"]} · '+{'copy':'复制素材','audio':'提取原声','draft':'保存草稿','decode':'分析镜头','hash':'核对素材','cache':'复用镜头分析','assets':'复制附加素材','timeline':'建立画面片段与运镜','captions':'建立字幕轨','fragments':'生成独立视频切片','separate':'分离人声与背景声','asr':'识别语音和字幕时间码','cpu_fallback':'GPU 不兼容，正在用新进程尝试 CPU'}.get(phase,'分析视频'),index/len(videos)*90)
         run=lambda args,observe=None,timeout=None:run_process(args,jid,observe=observe,timeout=timeout)
         if opts['splitScenes']:
             analysis,_,_=track_sheets.analyze(video,analysis_opts,DATA/'track-sheet-cache',FFMPEG,run,job['cancel'],notify)
         else:analysis={'sourceSHA256':track_sheets.source_hash(Path(video['path']),job['cancel'],notify),'segments':[{'start':0,'end':video['duration']}]}
-        result=jianying_projects.generate(video,analysis,root,FFMPEG,run,job['cancel'],notify,opts=opts)
+        import jianying_ai
+        runtime_opts=jianying_ai.runtime_options(opts,cfg)
+        result=jianying_projects.generate(video,analysis,root,FFMPEG,run,job['cancel'],notify,opts=runtime_opts)
         if progress['tid']:telemetry.finish(job,progress['tid'])
         telemetry.batch(job,'jianying_projects','剪映真实工程',len(videos),index+1)
         for warning in result.get('warnings',[]):log(warning,level='warning',job=jid)
@@ -602,7 +604,7 @@ def jianying_batch(ids,cfg,jid):
             register(p,Path(result['path']),'剪映真实工程',jid);register(p,Path(result['manifest']),'剪映工程清单',jid)
             results[:]=[r for r in results if r['sourcePath']!=video['path']];results.append(result)
             checkpoint(jid,key,[x for x in Path(result['directory']).rglob('*') if x.is_file()]);persist_jobs()
-    job['result']={'completed':len(results),'files':[r['path'] for r in results],'editorValidated':False}
+    job['result']={'completed':len(results),'degraded':sum(bool(r.get('timeline',{}).get('degraded')) for r in results),'files':[r['path'] for r in results],'editorValidated':False}
     if 'jianying_project' not in job['completedStages']:job['completedStages'].append('jianying_project')
 
 
@@ -2076,6 +2078,16 @@ class Handler(BaseHTTPRequestHandler):
             if path=='/api/project-evidence/capture':
                 association=evidence_association(body)
                 return self.reply(value=evidence_manager().capture(association['projectId'],body,association))
+            if path=='/api/jianying/auto-capture':
+                job,row=editor_result(body)
+                opts=jianying_projects.options(body.get('options',STATE.get('jianyingOptions',{})))
+                imported=row.get('editorImport')
+                if not imported:
+                    imported=jianying_projects.install_to_editor(row['directory'],opts)
+                    with LOCK:row['editorImport']=imported;save()
+                association=evidence_association(body|{'projectId':row['projectId']})
+                with LOCK:STATE['jianyingOptions']=opts;save()
+                return self.reply(value=evidence_manager().auto_capture(row['projectId'],body,association,imported,opts))
             if path=='/api/project-evidence/import':
                 association=evidence_association(body)
                 return self.reply(value=evidence_manager().import_images(association['projectId'],body,association))
@@ -2090,7 +2102,11 @@ class Handler(BaseHTTPRequestHandler):
             if path=='/api/publish/record':return self.reply(value=publish_workspace().record(body))
             if path=='/api/publish/open':return self.reply(value=publish_workspace().open(body.get('projectId',''),body.get('taskId',''),body.get('key','')))
             if path=='/api/tracks/import':return self.reply(value=import_track_files(body.get('paths')))
-            if path=='/api/jianying/status':return self.reply(value=jianying_projects.status(body.get('jianying',STATE.get('jianyingOptions',{}))))
+            if path=='/api/jianying/status':
+                import jianying_ai
+                opts=jianying_projects.options(body.get('jianying',STATE.get('jianyingOptions',{})))
+                runtime_opts=jianying_ai.runtime_options(opts,STATE['config'])
+                return self.reply(value=jianying_projects.status(opts)|{'ai':jianying_ai.availability(runtime_opts)})
             if path in ('/api/jianying/install','/api/jianying/launch','/api/jianying/auto-open'):
                 job,row=editor_result(body)
                 opts=jianying_projects.options(body.get('options',STATE.get('jianyingOptions',{})))

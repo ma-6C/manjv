@@ -3,6 +3,8 @@ from pathlib import Path
 import hashlib,json,os,re,shutil,time,uuid,importlib.metadata
 import ctypes,subprocess,threading
 import jianying_timeline
+import jianying_editing
+import math
 
 _IMPORT_LOCK=threading.Lock()
 _VERSION_CACHE={}
@@ -198,7 +200,8 @@ def generate(video,analysis,root,ffmpeg,run,event,notify=lambda *a:None,opts=Non
     additional=jianying_timeline.input_snapshots(video,opts)
     cancelled(event);root=Path(root).resolve();root.mkdir(parents=True,exist_ok=True)
     source=Path(video['path']).resolve();stat=source.stat()
-    if shutil.disk_usage(root).free<stat.st_size+sum(v["bytes"] for v in additional.values())+256*1024**2:raise ValueError('工程目录空间不足，需要容纳原片及音轨')
+    estimated=stat.st_size*(3 if opts['cutMaterials'] else 1)+round(video['duration']*44100*4*4)+sum(v['bytes'] for v in additional.values())
+    if shutil.disk_usage(root).free<estimated+256*1024**2:raise ValueError('工程目录空间不足，需要容纳原片、独立切片和分离音轨')
     safe=re.sub(r'[<>:"/\\|?*\x00-\x1f]','_',source.stem).strip(' .')[:60] or '视频'
     name=safe+'_'+time.strftime('%Y%m%d-%H%M%S')+'_'+uuid.uuid4().hex[:6]
     folder=root/name
@@ -214,25 +217,39 @@ def generate(video,analysis,root,ffmpeg,run,event,notify=lambda *a:None,opts=Non
         if digest.hexdigest()!=analysis['sourceSHA256']:raise ValueError('源片与镜头分析不匹配，请重新导出')
         assets.append({'relative':target.relative_to(folder).as_posix(),'sha256':digest.hexdigest(),'bytes':done})
         material=draft.VideoMaterial(str(target),material_name=source.name)
-        duration=min(round(video['duration']*1e6),material.duration)
+        source_duration=min(round(video['duration']*1e6),material.duration)
         script.append_tracks([draft.TrackSpec(draft.TrackType.video,'画面剪辑')])
-        ranges=jianying_timeline.ranges(analysis['segments'],duration,opts)
+        ranges=jianying_timeline.ranges(analysis['segments'],source_duration,opts)
+        duration=ranges[-1]['start']+ranges[-1]['duration']
         for index,item in enumerate(ranges):
             cancelled(event);notify('timeline',index,len(ranges))
             span=draft.Timerange(item['start'],item['duration'])
-            clip=draft.VideoSegment(material,span,source_timerange=span,volume=0 if video.get('audio') else 1)
-            if opts['timelineMode']=='detailed' and opts['cameraMotion']:
-                start_scale,end_scale=(1.0,1.035) if index%2==0 else (1.035,1.0)
-                clip.add_keyframe(draft.KeyframeProperty.uniform_scale,0,start_scale)
-                clip.add_keyframe(draft.KeyframeProperty.uniform_scale,max(1,item['duration']-1),end_scale)
+            clip_material=material;source_span=draft.Timerange(item['sourceStart'],item['sourceDuration'])
+            if opts['cutMaterials'] and opts['timelineMode']=='detailed':
+                notify('fragments',index,len(ranges));fragment=resources/('片段%04d.mp4'%(index+1))
+                run([str(ffmpeg),'-hide_banner','-loglevel','error','-nostdin','-y','-ss',str(item['sourceStart']/1e6),
+                     '-i',str(target),'-map','0:v:0','-an','-vf','tpad=stop_mode=clone:stop_duration=0.1',
+                     '-r','30','-frames:v',str(math.ceil(item['sourceDuration']/1e6*30)),
+                     '-c:v','libx264','-preset','fast','-crf','18','-pix_fmt','yuv420p',str(fragment)],timeout=600)
+                clip_material=draft.VideoMaterial(str(fragment),material_name=source.stem+'-素材%04d.mp4'%(index+1))
+                source_span=draft.Timerange(0,item['sourceDuration'])
+                if clip_material.duration<item['sourceDuration']:raise ValueError('切片输出不完整：'+fragment.name)
+                assets.append({'relative':fragment.relative_to(folder).as_posix(),'sha256':sha(fragment),'bytes':fragment.stat().st_size})
+            clip=draft.VideoSegment(clip_material,span,source_timerange=source_span,volume=0 if video.get('audio') else 1)
+            jianying_editing.style_video(draft,clip,index,ranges,opts)
             script.add_segment(clip,'画面剪辑')
         notify('timeline',len(ranges),len(ranges))
-        timeline=jianying_timeline.add_tracks(draft,script,video,resources,assets,ranges,duration,opts,ffmpeg,run,event,notify)
+        timeline=jianying_timeline.add_tracks(draft,script,video,resources,assets,ranges,duration,opts,ffmpeg,run,event,notify,source_duration)
+        effects=jianying_editing.layers(draft,script,duration,ranges,opts)
+        timeline.update({k:v for k,v in effects.items() if k!='resourceWarnings'});timeline['warnings']+=effects['resourceWarnings']
+        timeline['degraded']=any(v=='failed' for v in timeline.get('ai',{}).values())
+        cover=resources/'封面.jpg';run([str(ffmpeg),'-hide_banner','-loglevel','error','-nostdin','-y','-i',str(target),'-frames:v','1','-vf','scale=640:-2',str(cover)],timeout=60)
+        assets.append({'relative':cover.relative_to(folder).as_posix(),'sha256':sha(cover),'bytes':cover.stat().st_size})
         cancelled(event);notify('draft',0,1);script.save()
         content=folder/'draft_content.json';data=json.loads(content.read_text('utf-8'))
         if data['duration']>duration+50000:raise ValueError('同名字幕超出视频时长，请先核对 SRT 时间码')
         meta_file=folder/'draft_meta_info.json';meta=json.loads(meta_file.read_text('utf-8'))
-        meta.update(draft_id=data['id'],draft_name=name,draft_fold_path=str(folder),draft_root_path=str(root),tm_duration=duration)
+        meta.update(draft_id=data['id'],draft_name=name,draft_fold_path=str(folder),draft_root_path=str(root),tm_duration=duration,draft_cover=str(cover))
         meta_file.write_text(json.dumps(meta,ensure_ascii=False,indent=2),'utf-8')
         manifest={'format':1,'product':'ManjuStudio','kind':'jianying_project','name':name,'sourceName':source.name,'sourceSHA256':digest.hexdigest(),
                   'durationUs':duration,'ranges':ranges,'tracks':[{'name':t.get('name'),'type':t['type'],'segments':len(t.get('segments',[]))} for t in data['tracks']],
@@ -269,7 +286,9 @@ def relocate(folder):
     if not backup.exists():shutil.copy2(content,backup)
     content.write_text(json.dumps(data,ensure_ascii=False,indent=2),'utf-8');index['draftSHA256']=sha(content)
     (folder/'manju_project.json').write_text(json.dumps(index,ensure_ascii=False,indent=2),'utf-8')
-    meta=folder/'draft_meta_info.json';value=json.loads(meta.read_text('utf-8'));value.update(draft_fold_path=str(folder),draft_root_path=str(folder.parent));meta.write_text(json.dumps(value,ensure_ascii=False,indent=2),'utf-8')
+    meta=folder/'draft_meta_info.json';value=json.loads(meta.read_text('utf-8'));value.update(draft_fold_path=str(folder),draft_root_path=str(folder.parent))
+    if (folder/'Resources/封面.jpg').is_file():value['draft_cover']=str(folder/'Resources/封面.jpg')
+    meta.write_text(json.dumps(value,ensure_ascii=False,indent=2),'utf-8')
     check(folder);return {'directory':str(folder),'relinked':True}
 
 def _safe_draft_root(value):

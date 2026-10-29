@@ -145,7 +145,7 @@ class Manager:
         with lock:
             state.setdefault('projectEvidence',{'items':[],'tasks':[]})
             for task in state['projectEvidence']['tasks']:
-                if task['status'] in ('waiting_window','capturing'):
+                if task['status'] in ('waiting_window','capturing','automating'):
                     retired=task.get('platform') not in (None,'jianying')
                     task.update(status='failed',message='原截图来源已停用，请使用剪映重新采集' if retired else '上次采集已中断，请重新选择剪映工程窗口')
     @property
@@ -174,7 +174,7 @@ class Manager:
         if self.stop.is_set():raise ValueError('截图服务正在关闭')
         with self.lock:
             if self.stop.is_set():raise ValueError('截图服务正在关闭')
-            if any(t['projectId']==pid and t['status'] in ('waiting_window','capturing') for t in self.value['tasks']):raise ValueError('本剧已有截图采集正在等待，请先切换到官方工程窗口')
+            if any(t['projectId']==pid and t['status'] in ('waiting_window','capturing','automating') for t in self.value['tasks']):raise ValueError('本剧已有截图采集正在等待，请先切换到官方工程窗口')
             task={'id':uuid.uuid4().hex[:16],'projectId':pid,'platform':platform,'status':'waiting_window','message':'请在30秒内切换到选中的剪映工程窗口，保持画面清晰可见','createdAt':time.time()}
             self.value['tasks'].append(task);self.value['tasks']=self.value['tasks'][-100:];self.save()
         def run():
@@ -201,6 +201,48 @@ class Manager:
                 with self.lock:task.update(status='failed',message=str(error)[:1000]);self.save()
         threading.Thread(target=run,daemon=True,name='project-evidence-'+task['id']).start()
         return {'taskId':task['id'],'status':'waiting_window','message':task['message']}
+
+    def auto_capture(self,pid,body,association,imported,opts):
+        """Open, frame and capture a registered project without fabricated UI."""
+        import jianying_automation
+        if association.get('draftName')!=imported['name']:raise ValueError('自动截图的工程关联不匹配')
+        with self.lock:
+            if self.stop.is_set():raise ValueError('截图服务正在关闭')
+            if any(t['status'] in ('waiting_window','capturing','automating') for t in self.value['tasks']):raise ValueError('已有剪映截图任务，请等待当前任务完成')
+            task={'id':uuid.uuid4().hex[:16],'projectId':pid,'platform':'jianying','status':'automating',
+                  'message':'正在登记并打开对应剪映工程','createdAt':time.time()}
+            self.value['tasks'].append(task);self.value['tasks']=self.value['tasks'][-100:];self.save()
+        def run():
+            path=None
+            try:
+                opened=jianying_automation.open_registered_project(imported,opts,self.stop)
+                if not opened.get('projectOpened'):
+                    with self.lock:task.update(status='waiting_action',message=opened['message']);self.save()
+                    return
+                with self.lock:task.update(message='已定位本工程，正在调整时间线并等待画面稳定');self.save()
+                frame=jianying_automation.prepare_capture(imported,opts,self.stop)
+                candidate=self.backend.describe(frame['windowId'],'jianying')
+                if not candidate or candidate['pid']!=frame['pid']:raise ValueError('官方工程窗口在采集前已变化')
+                native=jianying_automation.NativeBackend()
+                exact=native.inspect(imported['name'],{})
+                if exact.get('mode')!='target_editor' or exact.get('windowId')!=frame['windowId']:raise ValueError('采集前工程标题核对失败')
+                folder=self.data/'official-project-evidence'/pid;folder.mkdir(parents=True,exist_ok=True)
+                path=folder/(task['id']+'.png')
+                metadata=self.backend.capture(frame['windowId'],'jianying',path)
+                exact=native.inspect(imported['name'],{})
+                if exact.get('mode')!='target_editor' or exact.get('windowId')!=frame['windowId']:raise ValueError('采集过程中工程已切换')
+                if metadata['pid']!=candidate['pid'] or metadata['title']!=candidate['title']:raise ValueError('截图时工程标题或进程发生变化')
+                if self.stop.is_set():raise InterruptedError('截图服务已停止')
+                metadata.update(projectTitleVerified=True,paintStable=True,automationWarnings=frame['warnings'])
+                matched={**association,'userConfirmed':body.get('userConfirmed') is True,'projectMatchedByAutomation':True,
+                         'status':'已核对工程标题和真实时间线；画面内容及使用效果仍需本人查看'}
+                item=self._record(pid,path,'jianying','window_capture','自动打开本工程后采集的原始剪映窗口',metadata,matched)
+                with self.lock:task.update(status='completed',message='实际工程截图已保存'+('；'+'；'.join(frame['warnings']) if frame['warnings'] else ''),item=item);self.save()
+            except Exception as exc:
+                if path and path.is_file():path.unlink()
+                with self.lock:task.update(status='failed',message=str(exc)[:2000]);self.save()
+        threading.Thread(target=run,daemon=True,name='jianying-auto-'+task['id']).start()
+        return {'taskId':task['id'],'status':'automating','message':task['message']}
     def import_images(self,pid,body,association):
         platform=body.get('platform');paths=body.get('paths');note=body.get('note','')
         require_platform(platform)

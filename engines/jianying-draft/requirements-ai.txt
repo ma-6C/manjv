@@ -1,0 +1,7 @@
+# Optional isolated Jianying AI runtime; do not install into the desktop app.
+# The offline-engine build must supply a matching torch/torchaudio CUDA build
+# and local model files. These dependencies are not present just because the
+# video-subtitle-remover engine was imported.
+faster-whisper>=1.2,<2
+demucs==4.0.1
+numpy>=1.26
