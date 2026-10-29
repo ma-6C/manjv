@@ -10,6 +10,7 @@ FILTERS={
  'images':('Images','*.jpg;*.jpeg;*.png;*.webp'),
  'documents':('Reports','*.pdf;*.docx;*.csv;*.jpg;*.jpeg;*.png;*.webp'),
  'videos':('Video files','*.mp4;*.mov;*.mkv;*.avi;*.m4v;*.webm;*.ts'),
+ 'subtitles':('Subtitles','*.srt'),
  'audio':('Audio','*.mp3;*.wav;*.m4a;*.aac;*.flac;*.ogg'),
 }
 

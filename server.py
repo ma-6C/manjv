@@ -45,6 +45,7 @@ sys.path.insert(0, str(ROOT / 'vendor'))
 import track_sheets
 import vsr_pool
 import jianying_projects
+import jianying_timeline
 import highlight_render
 import transform_tools
 import lama_local
@@ -554,7 +555,9 @@ def jianying_request(body):
         if not 1<=len(videos)<=30:raise ValueError('请选择1至30个已生成视频；可以将特定成品导入素材库后自由选集')
         request={}
     else:raise ValueError('工程输入版本无效')
+    if opts['subtitlePath'] and len(videos)!=1:raise ValueError('指定字幕文件仅支持单个视频；批量工程请为每个视频准备同名 SRT')
     for video in videos:
+        video['jianyingAssets']=jianying_timeline.input_snapshots(video,opts)
         st=Path(video['path']).stat();video['inputStat']={'bytes':st.st_size,'mtime':st.st_mtime_ns}
     return request|{'jianying':opts,'jianyingVideos':videos,'sourceKind':kind},videos
 
@@ -581,17 +584,19 @@ def jianying_batch(ids,cfg,jid):
             if progress['phase']==phase and now-progress['last']<.5 and value!=length:return
             if progress['phase']!=phase:
                 if progress['tid']:telemetry.finish(job,progress['tid'])
-                progress['tid']=telemetry.begin(job,'剪映工程 · '+phase,video['name'],length or 0,'bytes' if phase in ('copy','hash') else 'files' if phase in ('audio','draft','cache') else 'frames')
+                unit='bytes' if phase in ('copy','hash','assets') else 'clips' if phase=='timeline' else 'captions' if phase=='captions' else 'files' if phase in ('audio','draft','cache') else 'frames'
+                progress['tid']=telemetry.begin(job,'剪映工程 · '+phase,video['name'],length or 0,unit)
             progress.update(phase=phase,last=now)
             if isinstance(value,(int,float)) and isinstance(length,(int,float)):telemetry.advance(job,progress['tid'],value,length)
-            stage(jid,f'{index+1}/{len(videos)} · 剪映工程 · {video["name"]} · '+{'copy':'复制素材','audio':'提取原声','draft':'保存草稿','decode':'分析镜头','hash':'核对素材','cache':'复用镜头分析'}.get(phase,'分析视频'),index/len(videos)*90)
+            stage(jid,f'{index+1}/{len(videos)} · 剪映工程 · {video["name"]} · '+{'copy':'复制素材','audio':'提取原声','draft':'保存草稿','decode':'分析镜头','hash':'核对素材','cache':'复用镜头分析','assets':'复制附加素材','timeline':'建立画面片段与运镜','captions':'建立字幕轨'}.get(phase,'分析视频'),index/len(videos)*90)
         run=lambda args,observe=None,timeout=None:run_process(args,jid,observe=observe,timeout=timeout)
         if opts['splitScenes']:
             analysis,_,_=track_sheets.analyze(video,analysis_opts,DATA/'track-sheet-cache',FFMPEG,run,job['cancel'],notify)
         else:analysis={'sourceSHA256':track_sheets.source_hash(Path(video['path']),job['cancel'],notify),'segments':[{'start':0,'end':video['duration']}]}
-        result=jianying_projects.generate(video,analysis,root,FFMPEG,run,job['cancel'],notify)
+        result=jianying_projects.generate(video,analysis,root,FFMPEG,run,job['cancel'],notify,opts=opts)
         if progress['tid']:telemetry.finish(job,progress['tid'])
         telemetry.batch(job,'jianying_projects','剪映真实工程',len(videos),index+1)
+        for warning in result.get('warnings',[]):log(warning,level='warning',job=jid)
         result.update(projectId=video['projectId'],sourcePath=video['path']);p=get_project(video['projectId'])
         with LOCK:
             register(p,Path(result['path']),'剪映真实工程',jid);register(p,Path(result['manifest']),'剪映工程清单',jid)
@@ -2086,12 +2091,20 @@ class Handler(BaseHTTPRequestHandler):
             if path=='/api/publish/open':return self.reply(value=publish_workspace().open(body.get('projectId',''),body.get('taskId',''),body.get('key','')))
             if path=='/api/tracks/import':return self.reply(value=import_track_files(body.get('paths')))
             if path=='/api/jianying/status':return self.reply(value=jianying_projects.status(body.get('jianying',STATE.get('jianyingOptions',{}))))
-            if path in ('/api/jianying/install','/api/jianying/launch'):
+            if path in ('/api/jianying/install','/api/jianying/launch','/api/jianying/auto-open'):
                 job,row=editor_result(body)
                 opts=jianying_projects.options(body.get('options',STATE.get('jianyingOptions',{})))
                 if path.endswith('/install'):
                     result=jianying_projects.install_to_editor(row['directory'],opts)
                     with LOCK:row['editorImport']=result;STATE['jianyingOptions']=opts;save()
+                elif path.endswith('/auto-open'):
+                    import jianying_automation
+                    imported=row.get('editorImport')
+                    if not imported:
+                        imported=jianying_projects.install_to_editor(row['directory'],opts)
+                        with LOCK:row['editorImport']=imported;save()
+                    result=jianying_automation.open_registered_project(imported,opts)
+                    with LOCK:row['editorOpen']=result;STATE['jianyingOptions']=opts;save()
                 else:
                     result=jianying_projects.open_in_editor(row.get('editorImport',{}).get('directory',row['directory']),opts)
                     with LOCK:STATE['jianyingOptions']=opts;save()

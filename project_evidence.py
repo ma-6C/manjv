@@ -53,7 +53,12 @@ class WindowsCapture:
         try:
             import uiautomation as auto
             with auto.UIAutomationInitializerInThread():
-                stack=[(auto.ControlFromHandle(hwnd),0)];count=0;timeline=False;export=False
+                import jianying_automation
+                root=auto.ControlFromHandle(hwnd)
+                if jianying_automation.media_missing(root):return False
+                for owned in auto.GetRootControl().GetChildren():
+                    if owned.ProcessId==root.ProcessId and jianying_automation.media_missing(owned):return False
+                stack=[(root,0)];count=0;timeline=False;export=False
                 while stack and count<450:
                     control,depth=stack.pop();count+=1;identity=control.AutomationId or ''
                     timeline=timeline or 'main_timeline_root' in identity

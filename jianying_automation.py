@@ -1,7 +1,7 @@
 """Conservative handoff to a registered draft in the real Jianying editor.
 
-This uses native accessibility identities, never editor index forgery or a
-screen-coordinate template. Opening an application is not project validation.
+The optional mouse fallback uses the current verified control's clickable point.
+Opening an application is not project validation.
 """
 from __future__ import annotations
 
@@ -41,6 +41,18 @@ def _tree(root):
                 pass
 
 
+def media_missing(root):
+    for control in _tree(root):
+        try:
+            if control.IsOffscreen:continue
+            text=str(control.Name or '').strip()
+            if 'Media Not Found' in text or '检测到以下媒体丢失' in text or text in ('媒体丢失','重新链接媒体'):
+                return True
+            if text in ('链接媒体','Link Media') and str(control.ControlTypeName)=='WindowControl':return True
+        except Exception:continue
+    return False
+
+
 def _editor_title(control, name):
     identity = str(getattr(control, 'AutomationId', '') or '').casefold()
     description = _description(control)
@@ -50,7 +62,10 @@ def _editor_title(control, name):
 
 
 class NativeBackend:
-    """Only invokes an exact, unique accessibility node of a signed app."""
+    """Invokes a unique native target, with an optional guarded mouse fallback."""
+
+    def __init__(self, allow_mouse=False):
+        self.allow_mouse=allow_mouse
 
     def _roots(self, auto):
         if os.name != 'nt':
@@ -87,6 +102,7 @@ class NativeBackend:
     def _inspect(self, auto, name):
         homes, editors, matches = [], [], []
         for root in self._roots(auto):
+            if media_missing(root):return {'mode':'media_missing','windowId':str(root.NativeWindowHandle)}
             controls = list(_tree(root))
             identities = [str(getattr(item, 'AutomationId', '') or '') for item in controls]
             editor = any('main_timeline_root' in identity for identity in identities) and 'editor.export' in identities
@@ -106,7 +122,7 @@ class NativeBackend:
                 continue
             targets = [item for item in controls if _description(item) == 'HomePageDraftTitle:' + name]
             homes.append({'mode': 'home', 'windowId': str(root.NativeWindowHandle),
-                          'pid': root.ProcessId, 'targetCount': len(targets), '_targets': targets})
+                          'pid': root.ProcessId, 'targetCount': len(targets), '_targets': targets, '_root':root})
         # Never switch away from or close another active editor project.
         if len(matches) == 1 and len(editors) == 1:
             return matches[0]
@@ -159,6 +175,31 @@ class NativeBackend:
                     # the caller observe again rather than trying a parent.
                     legacy.DoDefaultAction()
                     return True
+            if self.allow_mouse:
+                root=fresh['_root']
+                root.SetActive(waitTime=0.1)
+                again=self._inspect(auto,name,editor)
+                if again.get('mode')!='home' or again.get('targetCount')!=1 or again.get('windowId')!=snapshot.get('windowId'):return False
+                target=again['_targets'][0];click_targets=[target]
+                parent=target.GetParentControl()
+                titles=[_description(item) for item in _tree(parent)] if parent else []
+                if [text for text in titles if text.startswith('HomePageDraftTitle:')]==['HomePageDraftTitle:'+name]:click_targets.append(parent)
+                for candidate in click_targets:
+                    x,y,clickable=candidate.GetClickablePoint()
+                    if not clickable:continue
+                    if auto.GetForegroundWindow()!=root.NativeWindowHandle:return False
+                    hit=auto.ControlFromPoint(x,y)
+                    if hit.ProcessId!=root.ProcessId:return False
+                    target_id=tuple(candidate.GetRuntimeId());confirmed=False
+                    if not target_id:continue
+                    for _ in range(12):
+                        if not hit:break
+                        if tuple(hit.GetRuntimeId())==target_id:
+                            confirmed=True;break
+                        hit=hit.GetParentControl()
+                    if not confirmed:continue
+                    auto.DoubleClick(x,y,waitTime=0.1)
+                    return True
             return False
 
     def launch(self, folder, options):
@@ -197,7 +238,7 @@ def open_registered_project(import_result, options=None, cancel_event=None, *, b
     if not _OPEN_LOCK.acquire(blocking=False):
         return waiting('另一个剪映工程正在交接，请稍后继续', 'editor_busy')
     try:
-        native = backend or NativeBackend()
+        native = backend or NativeBackend(opts['mouseOpen'])
         deadline = time.monotonic() + max(0, min(float(wait_timeout), 30))
         launched = False
         invoked = False
@@ -213,6 +254,8 @@ def open_registered_project(import_result, options=None, cancel_event=None, *, b
                 return {**base, 'status': 'completed', 'projectOpened': True, 'timelineVerified': True,
                         'projectTitleVerified': True, 'windowId': str(snapshot.get('windowId', '')),
                         'pid': snapshot.get('pid'), 'message': '已在官方剪映定位本工程的真实时间线；下一步核对并获取官方窗口截图'}
+            if mode == 'media_missing':
+                return waiting('剪映提示媒体丢失或需要链接媒体。请先使用工程目录中的 Resources 重连素材，确认画面可播放后继续；本次未记为打开成功。','editor_media_missing')
             if mode == 'other_editor':
                 return waiting('剪映当前打开了其他工程。请先自行保存，再打开「' + name + '」后继续')
             if mode in ('ambiguous', 'unsupported'):
@@ -227,7 +270,7 @@ def open_registered_project(import_result, options=None, cancel_event=None, *, b
                     # again; never blindly repeat the native action.
                     invoked = True
                 if not invoked:
-                    return waiting('已找到草稿，但剪映未提供可调用的原生打开动作。请手动打开「' + name + '」后继续')
+                    return waiting('已找到草稿，暂时无法安全自动打开。请手动打开「' + name + '」后继续')
             elif mode == 'unavailable' and not launched:
                 try:
                     result = native.launch(folder, opts)

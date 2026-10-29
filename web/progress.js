@@ -13,11 +13,15 @@ function monitorUnits(row){
  if(!row)return '当前阶段暂无可测量的百分比';
  const value=row.completed||0,total=row.total;
  if(row.unit==='seconds')return `已处理 ${monitorClock(value)}${total?' / '+monitorClock(total):''}`;
- if(row.unit==='bytes')return `已下载 ${size(value)}${total?' / '+size(total):''}`;
+ if(row.unit==='bytes')return `${row.label?.startsWith('剪映工程')?'已处理':'已下载'} ${size(value)}${total?' / '+size(total):''}`;
+ const unit={files:'个文件',clips:'个片段',captions:'条字幕'}[row.unit];
+ if(unit)return `已处理 ${Math.floor(value).toLocaleString()}${total?' / '+Math.floor(total).toLocaleString():''} ${unit}`;
  return `已处理 ${Math.floor(value).toLocaleString()}${total?' / '+Math.floor(total).toLocaleString():''} 帧`;
 }
 function monitorSpeed(row,job){
  if(job.status!=='running'||!row?.speed||row.status==='finalizing')return '—';
+ const unit={files:'文件/秒',clips:'片段/秒',captions:'条字幕/秒'}[row.unit];
+ if(unit)return row.speed.toFixed(1)+' '+unit;
  return row.unit==='seconds'?row.speed.toFixed(2)+' 倍速':row.unit==='bytes'?size(row.speed)+'/秒':row.speed.toFixed(1)+' 帧/秒';
 }
 function monitorTaskControls(job){
