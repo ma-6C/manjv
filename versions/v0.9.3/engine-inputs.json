@@ -1,0 +1,19 @@
+{
+  "engine": "vsr-1.4.0-sttn-cu128",
+  "sourceArchiveSha256": "5c70c7ae0fcbad1fa705b0d43e0c5777d164a6c45d8af74a42db315b4c61ab1c",
+  "officialIndex": "https://download.pytorch.org/whl/cu128",
+  "wheels": [
+    {
+      "name": "torch-2.7.0+cu128-cp312-cp312-win_amd64.whl",
+      "sha256": "1704e5dd66c9221e4e8b6ae2d80cbf54e129571e643f5fa9ca78cc6d2096403a"
+    },
+    {
+      "name": "torchvision-0.22.0+cu128-cp312-cp312-win_amd64.whl",
+      "sha256": "a87393c86649b7e56b4bf859fe95922ee6ec1c1f3b430246fb1a5b51f8aee37a"
+    }
+  ],
+  "baseCopiedFilesVerified": 11077,
+  "modelRuntimeTested": false,
+  "builderSha256": "90037b2339775e8e6d307ed9ab659dbba4cf8ac1ab7631ac3073a30967e37114",
+  "reusedByVersion": "0.9.3"
+}

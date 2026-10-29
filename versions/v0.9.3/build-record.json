@@ -1,0 +1,173 @@
+{
+  "version": "0.9.3",
+  "date": "2026-10-29",
+  "installer": "漫剧工坊-安装程序-0.9.3.exe",
+  "bytes": 406021258,
+  "sha256": "03c28371408fb13dfb5fa0ed2f093b8839196748c92660c3411db95b789dbbb6",
+  "compiledModules": 33,
+  "compiledModuleFiles": {
+    "server": {
+      "path": "_internal/server.cp312-win_amd64.pyd",
+      "sha256": "e694903683d741b459cee6e7c5ebd84532fabbdaebeaf41da32a5d72e6ce898c"
+    },
+    "ai_providers": {
+      "path": "_internal/ai_providers.cp312-win_amd64.pyd",
+      "sha256": "866e8e28e03819b9fecff534bc2fb906212980161c44fc0d1a1ba6efd764f35a"
+    },
+    "api_connections": {
+      "path": "_internal/api_connections.cp312-win_amd64.pyd",
+      "sha256": "2fd12f4640eb50c1c3cf8d568e89b9a43f382141ff578d286957df053f7b08a4"
+    },
+    "media_download": {
+      "path": "_internal/media_download.cp312-win_amd64.pyd",
+      "sha256": "411ba6bd55af3f7fed47c883b79139a4131af0c79773b52969f9ca06b7964acd"
+    },
+    "engine_bridge": {
+      "path": "_internal/engine_bridge.cp312-win_amd64.pyd",
+      "sha256": "9642cd351efc505a88253424df217b1ce5504fea9bc008c1ddad1de8f0cf08f0"
+    },
+    "licensing": {
+      "path": "_internal/licensing.cp312-win_amd64.pyd",
+      "sha256": "4441381a7c27b18cdff8ae2b2dd78a3bc4a77feb260f87a724b1aaafa6dd4a31"
+    },
+    "win_security": {
+      "path": "_internal/win_security.cp312-win_amd64.pyd",
+      "sha256": "dabfe1c182a47c969bb96769d90858ed1a874ac4bd9c1cc04737de8c7753fda3"
+    },
+    "release_key": {
+      "path": "_internal/release_key.cp312-win_amd64.pyd",
+      "sha256": "642db97797a18a18e7d60d55a561e789064dca7a9a073b09c4b630e4f67a3870"
+    },
+    "runtime_paths": {
+      "path": "_internal/runtime_paths.cp312-win_amd64.pyd",
+      "sha256": "2748cfe846e8a154387b72549ab4f56d071bb2a1d7d6886ada08bd1654ff0b85"
+    },
+    "file_picker": {
+      "path": "_internal/file_picker.cp312-win_amd64.pyd",
+      "sha256": "ec352f50c3ce73fb771fe864d8751485a80a90bb03c826c33b887032818b09a2"
+    },
+    "local_session": {
+      "path": "_internal/local_session.cp312-win_amd64.pyd",
+      "sha256": "380d3eb21079fff7a865ec233490f06b40708a0ce3e52b1cb887244a109ca48d"
+    },
+    "engine_manager": {
+      "path": "_internal/engine_manager.cp312-win_amd64.pyd",
+      "sha256": "b75758b9460de98f7ee16eaaabe41c9a3ccf40ae6ed1152780f5cae2878b5ca2"
+    },
+    "promotions": {
+      "path": "_internal/promotions.cp312-win_amd64.pyd",
+      "sha256": "467b3f11b78a9457f115d4d1c3bb596a0ae0262e36f2bed0015c1d41e8d61dc2"
+    },
+    "task_progress": {
+      "path": "_internal/task_progress.cp312-win_amd64.pyd",
+      "sha256": "f70c70fc85a900d9299f6f161a8dc20e7109dc859536b30c1463c5c797d2fa0d"
+    },
+    "hongguo_source": {
+      "path": "_internal/hongguo_source.cp312-win_amd64.pyd",
+      "sha256": "4634372f1e86381ee5617a274a8834e3ece8b7a1604cf4b1a5b9a5d5ed22b8dc"
+    },
+    "guoapp_source": {
+      "path": "_internal/guoapp_source.cp312-win_amd64.pyd",
+      "sha256": "9bbcc40fee5ba9ff8f5814f5816c0f76aeda9d488de5ba26c16566faa1435a38"
+    },
+    "official_hongguo_share": {
+      "path": "_internal/official_hongguo_share.cp312-win_amd64.pyd",
+      "sha256": "7b4a65ea58d89516deb05de411559fc3b5052c1ed5b49ac436f0f901f8692e22"
+    },
+    "source_imports": {
+      "path": "_internal/source_imports.cp312-win_amd64.pyd",
+      "sha256": "ea4fb1d307325f8f6921c8a72a6b58ce8a93b746ebbb61927edc1d1633203433"
+    },
+    "episode_selection": {
+      "path": "_internal/episode_selection.cp312-win_amd64.pyd",
+      "sha256": "d12629591660c5752afcb97c822b016d6d5c2815603720f80c759c23cd013a68"
+    },
+    "gpu_encoding": {
+      "path": "_internal/gpu_encoding.cp312-win_amd64.pyd",
+      "sha256": "a30d8858d7ef8d93518225980611ed5ec792b6d68dad70aff3cb1b6bfdd1d668"
+    },
+    "transform_tools": {
+      "path": "_internal/transform_tools.cp312-win_amd64.pyd",
+      "sha256": "6e81c2c279c6aadaa685da5754dac68cadb3674fabea5a97c1ecfc8f7e5e30a2"
+    },
+    "track_sheets": {
+      "path": "_internal/track_sheets.cp312-win_amd64.pyd",
+      "sha256": "a7fff31092581af94788aadea799346c042280777bbf41cbc29ee6c9666b814f"
+    },
+    "jianying_projects": {
+      "path": "_internal/jianying_projects.cp312-win_amd64.pyd",
+      "sha256": "4565479d669c7d6b688e84a9644d367741cc0d02324b983f4a42b51bbc7c8feb"
+    },
+    "highlight_render": {
+      "path": "_internal/highlight_render.cp312-win_amd64.pyd",
+      "sha256": "131596b681e144b649f2fcfb1ad8bec7ad172ad04a09997af688f2576cf7c068"
+    },
+    "vsr_pool": {
+      "path": "_internal/vsr_pool.cp312-win_amd64.pyd",
+      "sha256": "5d833e3aec8a2432919c17931d3636e3743ce661af298b259f13c7c2484c23db"
+    },
+    "lama_local": {
+      "path": "_internal/lama_local.cp312-win_amd64.pyd",
+      "sha256": "ec6b576d90443bb5abf2fd86ba865b3a3313c033d0a3fc8484b9436d19ed179f"
+    },
+    "publish_materials": {
+      "path": "_internal/publish_materials.cp312-win_amd64.pyd",
+      "sha256": "c7cd0763f07bc1fe8acca68c46654e4124204f2e1cfff881a6a95139ea915634"
+    },
+    "publish_workflow": {
+      "path": "_internal/publish_workflow.cp312-win_amd64.pyd",
+      "sha256": "4d725b0a2c5bc56ab24a235bb76596bacba320584dc3e419e231bb56f8d0d235"
+    },
+    "publish_browser": {
+      "path": "_internal/publish_browser.cp312-win_amd64.pyd",
+      "sha256": "9587c848fc87088b3bc39e9a98e89b4954e9cc5db465786b23bec293f7697ff2"
+    },
+    "project_evidence": {
+      "path": "_internal/project_evidence.cp312-win_amd64.pyd",
+      "sha256": "62117ab960679050e33e93b4785160774c80736e19e750e9944ed5b5181a188f"
+    },
+    "studio_flow": {
+      "path": "_internal/studio_flow.cp312-win_amd64.pyd",
+      "sha256": "51afa1e019001c7bf298fa25ed08b8a29f37f7e6659a7fedd7e8e1f1699e605f"
+    },
+    "studio_flow_adapter": {
+      "path": "_internal/studio_flow_adapter.cp312-win_amd64.pyd",
+      "sha256": "0c178b59f642b842430c355dbed5a5c84afd79dd333b2f96718d2f7a25ed8d24"
+    },
+    "jianying_automation": {
+      "path": "_internal/jianying_automation.cp312-win_amd64.pyd",
+      "sha256": "d5665692768e52686e816c8c1c2a7a6bf02ded720c888a26a5d2cfca34d34e9a"
+    }
+  },
+  "signedFiles": 1971,
+  "recordedBuildInputs": 90,
+  "applicationIntegritySigned": true,
+  "installerConstructed": true,
+  "nativeCore": {
+    "version": "0.2.68+75-manju.2",
+    "sha256": "ba284be3a9c502d1c66b45674c56df24998c89184b4e80c3912ffddb6fb5c34d",
+    "packagedManifestAndBinaryMatch": true
+  },
+  "independentDramaDirectoriesIncluded": true,
+  "standaloneCustomerCheckerIncluded": false,
+  "runtimeTestsRun": false,
+  "downloadTestsRun": false,
+  "modelTestsRun": false,
+  "browserTestsRun": false,
+  "installerExecutionTested": false,
+  "customerHardwareTested": false,
+  "testsSkippedAtUserRequest": true,
+  "externalPlatformSubmitted": false,
+  "engineV2": {
+    "engine": "vsr-1.4.0-sttn-cu128",
+    "file": "漫剧工坊-AI离线引擎-v2-cu128.zip",
+    "bytes": 4765639838,
+    "sha256": "9b369e10e505262fd9730044cfe93697ee95e5fd29c19baea847a1c086e53ddb",
+    "unpackedBytes": 7989124344,
+    "signedFiles": 22371,
+    "modelRuntimeTested": false,
+    "customerHardwareTested": false
+  },
+  "engineArchiveReusedFrom": "0.9.2",
+  "engineArchiveSha256Verified": true
+}

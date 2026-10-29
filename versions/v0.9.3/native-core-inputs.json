@@ -1,0 +1,18 @@
+{
+  "createdAt": "2026-10-28T23:02:44+08:00",
+  "version": "0.2.68+75",
+  "upstreamPatch": "https://github.com/limbia/guoapp/commit/5fee5b4e93893cfb75ed0df9e1cbb387b334172d",
+  "sha256": "ba284be3a9c502d1c66b45674c56df24998c89184b4e80c3912ffddb6fb5c34d",
+  "sourceSha256": {
+    "provider_hongguo_multi_media.go": "fa2a1bece12aa1606b96d87c2126a81b0beb52b85fbb32a7b5e2727c9ad7f19f",
+    "provider_hongguo_pure_sign.go": "989e65b60607e4c00878fc164f231c3297824ca8ef8d871a1f319eb139899b1b",
+    "provider_hongguo_playback_device.go": "e3c229299dc16c4c60603968517809f5027b4ba29ef6b0e16390e139c7b4df76",
+    "provider_hongguo_native_media.go": "334f552e253e3f317bd33dc0c2944bd838c447bca810060be31d809fba1ca3e9",
+    "provider_hongguo_app.go": "90e7fe6cb523d521656c41d718785f87179d7da62ce4b998f26164a913193341"
+  },
+  "testsRun": true,
+  "liveDownloadVerified": true,
+  "deployed": true,
+  "verificationReport": "参考/验证/20261028-hongguo/registered-summary.json",
+  "anonymousPlaybackPatch": "https://github.com/sunnysky123/hongguo-web/commit/334df0a2e9cb55fd8d8a587b92c1bf62106a9570"
+}

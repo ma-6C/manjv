@@ -252,7 +252,6 @@ class ImportManager:
                     if warning not in row['warnings']:row['warnings'].append(warning)
             if target.parent!=platform_dir or not target.is_relative_to(root):raise ValueError('归档目录超出本剧独立保存位置')
             if target.exists():
-                if not target.is_dir():raise ValueError('本剧保存位置已有同名文件，请选择其他保存位置')
                 metadata=target/'剧集资料.json'
                 if metadata.exists():
                     existing=read(metadata,{})

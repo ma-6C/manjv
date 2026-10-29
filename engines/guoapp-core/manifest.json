@@ -1,7 +1,7 @@
 {
-  "version": "0.2.67+74-manju.1",
+  "version": "0.2.68+75-manju.2",
   "sourceCommit": "0e60928514c31a96ade9b31866948f15da5ca2a6",
-  "sha256": "73569be4058402a09cb7f6c9fa46bf145cad37f4bc87e9ed010460b07b779b8e",
+  "sha256": "ba284be3a9c502d1c66b45674c56df24998c89184b4e80c3912ffddb6fb5c34d",
   "source": "https://github.com/zhoufuweigg/guoapp",
   "allSources": false,
   "compatibilityPatch": "https://github.com/Xanerix/guoapp/commit/8454613e9113a59fa2315d54f58e72d914b3ffd9",
@@ -13,6 +13,8 @@
     "transientResumeRetries": 1
   },
   "playbackCompatibilityPatch": "https://github.com/limbia/guoapp/commit/5fee5b4e93893cfb75ed0df9e1cbb387b334172d",
-  "playbackRequest": "multi_video_model/v1",
-  "playbackVerification": "build-only; live download not verified"
+  "playbackRequest": "registered-anonymous/multi_video_model/v1",
+  "playbackVerification": "2026-10-28: 5/5 real downloads, imports and full decodes; 5/5 fresh-process direct resolves",
+  "anonymousPlaybackPatch": "https://github.com/sunnysky123/hongguo-web/commit/334df0a2e9cb55fd8d8a587b92c1bf62106a9570",
+  "playbackVerificationReport": "参考/验证/20261028-hongguo/registered-summary.json"
 }

@@ -5,7 +5,6 @@ import (
 	"context"
 	"crypto/aes"
 	"crypto/cipher"
-	"crypto/rand"
 	"crypto/sha512"
 	"encoding/json"
 	"errors"
@@ -69,19 +68,7 @@ func hongguoPyEncode(raw string) string {
 	return out.String()
 }
 
-func hongguoPlayerLocalID() string {
-	raw := make([]byte, 6)
-	if _, err := rand.Read(raw); err != nil {
-		panic("hongguo: local id")
-	}
-	value := uint64(0)
-	for _, b := range raw {
-		value = value<<8 | uint64(b)
-	}
-	return strconv.FormatUint(1_000_000_000_000_000+value, 10)
-}
-
-func hongguoDeviceQuery(khronos int64, rticket int64, iid, deviceID string) string {
+func hongguoDeviceQuery(rticket int64, iid, deviceID string) string {
 	fields := [][2]string{
 		{"ac", "wifi"},
 		{"channel", "update_64"},
@@ -108,9 +95,8 @@ func hongguoDeviceQuery(khronos int64, rticket int64, iid, deviceID string) stri
 		{"need_personal_recommend", "1"},
 		{"player_so_load", "1"},
 		{"is_android_pad_screen", "0"},
-		{"iid", iid},
 		{"device_id", deviceID},
-		{"ts", strconv.FormatInt(khronos, 10)},
+		{"iid", iid},
 		{"_rticket", strconv.FormatInt(rticket, 10)},
 	}
 	var parts []string
@@ -138,41 +124,20 @@ func (downloader *Downloader) hongguoPlayerPost(ctx context.Context, videoID str
 	if err != nil {
 		return nil, err
 	}
-	khronos := time.Now().Unix()
-	iid, deviceID := hongguoPlayerLocalID(), hongguoPlayerLocalID()
-
-	var query string
-	var ticket int64
-	ticketBase := time.Now().UnixMilli()
-	for offset := int64(0); offset < 32; offset++ {
-		ticket = ticketBase + offset
-		query = hongguoDeviceQuery(khronos, ticket, iid, deviceID)
-		if hgBranchOf(query, body, uint32(khronos)) != 1 {
-			break
-		}
-	}
-	fullURL := hongguoMultiBaseURL + hongguoMultiPath + "?" + query
-
-	request, err := http.NewRequestWithContext(ctx, http.MethodPost, fullURL, bytes.NewReader(body))
+	identity, err := downloader.hongguoPlaybackDevice(ctx)
 	if err != nil {
 		return nil, err
 	}
-	request.Header.Set("User-Agent", hongguoMultiUserAgent)
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, hongguoMultiBaseURL+hongguoMultiPath, bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	request.Header.Set("User-Agent", hongguoPlaybackUA)
 	request.Header.Set("Accept", "application/json; charset=utf-8,application/x-protobuf")
 	request.Header.Set("Content-Type", "application/json; charset=UTF-8")
-	request.Header.Set("x-xs-from-web", "0")
-	request.Header.Set("x-ss-req-ticket", strconv.FormatInt(ticket, 10))
-	request.Header.Set("x-tt-request-tag", "t=0;n=0")
-	request.Header.Set("sdk-version", "2")
-	request.Header.Set("passport-sdk-version", "50561")
-	request.Header.Set("x-vc-bdturing-sdk-version", "3.7.2.cn")
-	request.Header.Set("x-ss-stub", hgMd5HexUpper(body))
-	request.Header.Set("x-tt-dt", "")
-	for key, value := range hongguoPureSign(fullURL, body, uint32(khronos)) {
-		request.Header.Set(key, value)
-	}
-
-	response, err := downloader.doPreparedCatalogRequest(request, 20*time.Second, nil)
+	response, err := downloader.doPreparedCatalogRequest(request, 15*time.Second, func(prepared *http.Request) {
+		prepared.URL.RawQuery = hongguoDeviceQuery(time.Now().UnixMilli(), identity.iid, identity.deviceID)
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -434,8 +399,14 @@ func hongguoMediaURLCandidates(item map[string]any) []string {
 }
 
 func selectHongguoFallbackMedia(info map[string]any) (providerMedia, error) {
-	videoList, ok := info["video_list"].(map[string]any)
-	if !ok || len(videoList) == 0 {
+	videoList, _ := info["video_list"].(map[string]any)
+	if list, ok := info["video_list"].([]any); ok {
+		videoList = make(map[string]any, len(list))
+		for index, item := range list {
+			videoList[strconv.Itoa(index)] = item
+		}
+	}
+	if len(videoList) == 0 {
 		return providerMedia{}, errors.New("红果 App 片源接口未返回播放列表")
 	}
 	var seed []byte
@@ -515,7 +486,7 @@ func (downloader *Downloader) resolveHongguoAppMedia(ctx context.Context, videoI
 		return providerMedia{}, err
 	}
 	if hongguoHasVideoList(model["video_list"]) {
-		return selectHongguoAppMedia(model)
+		return selectHongguoFallbackMedia(model)
 	}
 	fallback := hongguoParseFallback(model["fallback_api"])
 	if fallback == "" {
