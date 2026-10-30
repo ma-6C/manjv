@@ -11,3 +11,8 @@ pymediainfo==7.0.1
 imageio==2.38.1
 uiautomation==2.0.29
 comtypes==1.4.17
+winrt-Windows.Media.Ocr==4!10.0.28000.2705; platform_system == "Windows"
+winrt-Windows.Graphics.Imaging==4!10.0.28000.2705; platform_system == "Windows"
+winrt-Windows.Storage==4!10.0.28000.2705; platform_system == "Windows"
+winrt-Windows.Storage.Streams==4!10.0.28000.2705; platform_system == "Windows"
+winrt-Windows.Globalization==4!10.0.28000.2705; platform_system == "Windows"

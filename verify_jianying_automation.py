@@ -1,5 +1,6 @@
 """Controlled tests; no native app is launched by this test."""
 import tempfile
+import json
 import threading
 import unittest
 from pathlib import Path
@@ -30,6 +31,17 @@ class Fake:
     def launch(self, *args):
         self.launches += 1
         return {'appLaunched': True}
+
+
+class FirstDraftFake(Fake):
+    def __init__(self,snapshots,raises=False):
+        super().__init__(snapshots,raises=raises)
+        self.first_actions=0
+
+    def open_first(self,*args):
+        self.first_actions+=1
+        if self.raises:raise RuntimeError('unknown click outcome')
+        return True
 
 
 HOME = {'mode': 'home', 'windowId': '1', 'targetCount': 1}
@@ -82,11 +94,85 @@ class Tests(unittest.TestCase):
         self.assertEqual(fake.actions, 1)
         self.assertEqual(fake.launches, 0)
 
+    def test_first_draft_opens_without_per_card_accessibility(self):
+        fake=FirstDraftFake([{**HOME,'targetCount':0},OPEN])
+        with patch.object(module.jianying_registry,'first_draft',return_value=True):
+            result=module.open_registered_project(self.result,{'mouseOpen':True},backend=fake,wait_timeout=1)
+        self.assertEqual(result['status'],'completed')
+        self.assertEqual(fake.first_actions,1)
+        self.assertEqual(fake.actions,0)
+
+    def test_first_draft_gate_prevents_opening_another_card(self):
+        fake=FirstDraftFake([{**HOME,'targetCount':0}])
+        with patch.object(module.jianying_registry,'first_draft',return_value=False):
+            result=module.open_registered_project(self.result,{'mouseOpen':True},backend=fake,wait_timeout=0)
+        self.assertEqual(result['status'],'waiting_action')
+        self.assertEqual(fake.first_actions,0)
+
+    def test_idle_home_exits_before_index_registration(self):
+        fake=FirstDraftFake([HOME,{**HOME,'targetCount':0},OPEN])
+        order=[]
+        fake.close_home=lambda *args:order.append('close_home') or True
+        with patch.object(module,'NativeBackend',return_value=fake),patch.object(module.jianying_registry,'first_draft',return_value=True),patch.object(module.jianying_registry,'register',side_effect=lambda *args:order.append('register') or {}):
+            result=module.open_registered_project(self.result,{'mouseOpen':True},wait_timeout=1)
+        self.assertEqual(result['status'],'completed')
+        self.assertEqual(order,['close_home','register'])
+
+    def test_other_editor_never_closes_or_registers(self):
+        fake=FirstDraftFake([{'mode':'other_editor'}])
+        with patch.object(module,'NativeBackend',return_value=fake),patch.object(module.jianying_registry,'register') as register:
+            result=module.open_registered_project(self.result,{'mouseOpen':True},wait_timeout=0)
+        self.assertEqual(result['status'],'waiting_action')
+        register.assert_not_called()
+        self.assertEqual(fake.first_actions,0)
+
+    def test_home_exit_prompt_keeps_index_unchanged(self):
+        fake=FirstDraftFake([HOME]);fake.close_home=lambda *args:False
+        with patch.object(module,'NativeBackend',return_value=fake),patch.object(module.jianying_registry,'register') as register:
+            result=module.open_registered_project(self.result,{'mouseOpen':True},wait_timeout=0)
+        self.assertEqual(result['status'],'waiting_action')
+        register.assert_not_called()
+        self.assertEqual(fake.first_actions,0)
+
+    def test_first_draft_click_unknown_outcome_is_not_repeated(self):
+        fake=FirstDraftFake([{**HOME,'targetCount':0},HOME,OPEN],raises=True)
+        with patch.object(module.jianying_registry,'first_draft',return_value=True):
+            result=module.open_registered_project(self.result,{'mouseOpen':True},backend=fake,wait_timeout=1)
+        self.assertEqual(result['status'],'completed')
+        self.assertEqual(fake.first_actions,1)
+
+    def test_index_first_draft_requires_path_name_and_id(self):
+        folder=self.folder/'draft';folder.mkdir()
+        row={'draft_name':'registered','draft_fold_path':str(folder),'draft_id':'our-id'}
+        index_path=self.folder/'root_meta_info.json'
+        manifest={**self.manifest,'editorDraftId':'our-id'}
+        with patch.dict('os.environ',{'LOCALAPPDATA':str(self.folder/'empty-profile')}),patch.object(module.jianying_projects,'_open_index',return_value=(manifest,False)):
+            for changed in ({'draft_name':'other'},{'draft_id':'other-id'},{'draft_fold_path':str(self.folder/'other')}):
+                index_path.write_text(json.dumps({'all_draft_store':[{**row,**changed}]}),'utf-8')
+                self.assertFalse(module.jianying_registry.first_draft(folder))
+            index_path.write_text(json.dumps({'all_draft_store':[row]}),'utf-8')
+            self.assertTrue(module.jianying_registry.first_draft(folder))
+            index_path.write_text(json.dumps({'all_draft_store':[{'draft_name':'other'},row]}),'utf-8')
+            self.assertFalse(module.jianying_registry.first_draft(folder))
+
     def test_unknown_action_outcome_observes_without_retry(self):
         fake = Fake([HOME, HOME, OPEN], raises=True)
         result = self.run_flow(fake, timeout=1)
         self.assertEqual(result['status'], 'completed')
         self.assertEqual(fake.actions, 1)
+
+    def test_native_reassigned_id_requires_metadata_name_path_and_id_agreement(self):
+        folder=self.folder/'draft';folder.mkdir()
+        row={'draft_name':'registered','draft_fold_path':str(folder),'draft_id':'native-id'}
+        index_path=self.folder/'root_meta_info.json';index_path.write_text(json.dumps({'all_draft_store':[row]}),'utf-8')
+        manifest={**self.manifest,'editorDraftId':'original-id'}
+        meta=folder/'draft_meta_info.json'
+        with patch.dict('os.environ',{'LOCALAPPDATA':str(self.folder/'empty-profile')}),patch.object(module.jianying_projects,'_open_index',return_value=(manifest,False)):
+            for changed in ({'draft_name':'other'},{'draft_id':'other-id'},{'draft_fold_path':str(self.folder/'other')}):
+                meta.write_text(json.dumps({**row,**changed}),'utf-8')
+                self.assertFalse(module.jianying_registry.first_draft(folder))
+            meta.write_text(json.dumps(row),'utf-8')
+            self.assertTrue(module.jianying_registry.first_draft(folder))
 
     def test_launch_alone_never_completes(self):
         fake = Fake([{'mode': 'unavailable'}])

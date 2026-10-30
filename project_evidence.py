@@ -48,23 +48,20 @@ class WindowsCapture:
         return self.cache[key]
 
     def _editor_surface(self,hwnd):
-        # The real timeline and export controls distinguish an open editing
-        # project from the home screen, splash screen or floating player.
+        # Inspect official app roots only. Current Qt builds expose editing
+        # panes instead of the older timeline/export accessibility IDs.
         try:
             import uiautomation as auto
             with auto.UIAutomationInitializerInThread():
                 import jianying_automation
                 root=auto.ControlFromHandle(hwnd)
                 if jianying_automation.media_missing(root):return False
-                for owned in auto.GetRootControl().GetChildren():
+                for owned in jianying_automation.NativeBackend()._roots(auto):
                     if owned.ProcessId==root.ProcessId and jianying_automation.media_missing(owned):return False
-                stack=[(root,0)];count=0;timeline=False;export=False
-                while stack and count<450:
-                    control,depth=stack.pop();count+=1;identity=control.AutomationId or ''
-                    timeline=timeline or 'main_timeline_root' in identity
-                    export=export or identity=='editor.export'
-                    if timeline and export:return True
-                    if depth<16:stack.extend((c,depth+1) for c in reversed(control.GetChildren()))
+                controls=list(jianying_automation._tree(root))
+                if jianying_automation.jianying_visual.qt_editor_surface(root,controls):return True
+                identities={str(c.AutomationId or '') for c in controls}
+                return any('main_timeline_root' in identity for identity in identities) and 'editor.export' in identities
         except Exception:pass
         return False
 
@@ -202,7 +199,7 @@ class Manager:
         threading.Thread(target=run,daemon=True,name='project-evidence-'+task['id']).start()
         return {'taskId':task['id'],'status':'waiting_window','message':task['message']}
 
-    def auto_capture(self,pid,body,association,imported,opts):
+    def auto_capture(self,pid,body,association,imported,opts,*,wait=False,cancel_event=None,progress=None,on_complete=None):
         """Open, frame and capture a registered project without fabricated UI."""
         import jianying_automation
         if association.get('draftName')!=imported['name']:raise ValueError('自动截图的工程关联不匹配')
@@ -214,13 +211,16 @@ class Manager:
             self.value['tasks'].append(task);self.value['tasks']=self.value['tasks'][-100:];self.save()
         def run():
             path=None
+            event=cancel_event or self.stop
             try:
-                opened=jianying_automation.open_registered_project(imported,opts,self.stop)
+                if progress:progress('正在置顶目标草稿并打开第一个草稿')
+                opened=jianying_automation.open_registered_project(imported,opts,event)
                 if not opened.get('projectOpened'):
                     with self.lock:task.update(status='waiting_action',message=opened['message']);self.save()
-                    return
+                    return copy.deepcopy(task)
                 with self.lock:task.update(message='已定位本工程，正在调整时间线并等待画面稳定');self.save()
-                frame=jianying_automation.prepare_capture(imported,opts,self.stop)
+                if progress:progress('正在调整时间线并等待画面稳定')
+                frame=jianying_automation.prepare_capture(imported,opts,event)
                 candidate=self.backend.describe(frame['windowId'],'jianying')
                 if not candidate or candidate['pid']!=frame['pid']:raise ValueError('官方工程窗口在采集前已变化')
                 native=jianying_automation.NativeBackend()
@@ -232,15 +232,25 @@ class Manager:
                 exact=native.inspect(imported['name'],{})
                 if exact.get('mode')!='target_editor' or exact.get('windowId')!=frame['windowId']:raise ValueError('采集过程中工程已切换')
                 if metadata['pid']!=candidate['pid'] or metadata['title']!=candidate['title']:raise ValueError('截图时工程标题或进程发生变化')
-                if self.stop.is_set():raise InterruptedError('截图服务已停止')
-                metadata.update(projectTitleVerified=True,paintStable=True,automationWarnings=frame['warnings'])
+                if self.stop.is_set() or event.is_set():raise InterruptedError('截图服务已停止')
+                metadata.update(projectTitleVerified=exact.get('projectTitleVerified') is True,
+                    projectIdentityVerified=exact.get('projectIdentityVerified') is True or exact.get('projectTitleVerified') is True,
+                    projectMatchMethod=exact.get('projectMatchMethod','native_project_title'),
+                    paintStable=True,automationWarnings=frame['warnings'])
                 matched={**association,'userConfirmed':body.get('userConfirmed') is True,'projectMatchedByAutomation':True,
                          'status':'已核对工程标题和真实时间线；画面内容及使用效果仍需本人查看'}
                 item=self._record(pid,path,'jianying','window_capture','自动打开本工程后采集的原始剪映窗口',metadata,matched)
+                if on_complete:on_complete(item)
                 with self.lock:task.update(status='completed',message='实际工程截图已保存'+('；'+'；'.join(frame['warnings']) if frame['warnings'] else ''),item=item);self.save()
+            except InterruptedError:
+                if path and path.is_file():path.unlink()
+                with self.lock:task.update(status='failed',message='截图已暂停，工程保留，可继续未完成部分');self.save()
+                if wait:raise
             except Exception as exc:
                 if path and path.is_file():path.unlink()
                 with self.lock:task.update(status='failed',message=str(exc)[:2000]);self.save()
+            return copy.deepcopy(task)
+        if wait:return run()
         threading.Thread(target=run,daemon=True,name='jianying-auto-'+task['id']).start()
         return {'taskId':task['id'],'status':'automating','message':task['message']}
     def import_images(self,pid,body,association):

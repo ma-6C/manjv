@@ -538,7 +538,14 @@ def track_sheet_batch(ids,cfg,jid):
 
 
 def jianying_request(body):
-    opts=jianying_projects.options(body.get('jianying',STATE.get('jianyingOptions',{})))
+    automatic=body.get('automatic',False);auto_diagram=body.get('autoDiagram',False)
+    if type(automatic) is not bool or type(auto_diagram) is not bool:raise ValueError('工程图运行方案无效')
+    preferences=body.get('jianying',STATE.get('jianyingOptions',{}))
+    if not isinstance(preferences,dict):raise ValueError('工程图设置无效')
+    if automatic:
+        import jianying_jobs
+        opts=jianying_jobs.automatic_options(preferences,STATE['config'])
+    else:opts=jianying_projects.options(preferences)
     ids=body.get('ids');kind=body.get('sourceKind','original')
     if kind=='original':
         request,videos=track_request(body)
@@ -557,55 +564,15 @@ def jianying_request(body):
     else:raise ValueError('工程输入版本无效')
     if opts['subtitlePath'] and len(videos)!=1:raise ValueError('指定字幕文件仅支持单个视频；批量工程请为每个视频准备同名 SRT')
     for video in videos:
+        video['projectName']=get_project(video['projectId'])['name']
         video['jianyingAssets']=jianying_timeline.input_snapshots(video,opts)
         st=Path(video['path']).stat();video['inputStat']={'bytes':st.st_size,'mtime':st.st_mtime_ns}
-    return request|{'jianying':opts,'jianyingVideos':videos,'sourceKind':kind},videos
+    return request|{'jianying':opts,'jianyingVideos':videos,'sourceKind':kind,'automatic':automatic,'autoDiagram':auto_diagram},videos
 
 
 def jianying_batch(ids,cfg,jid):
-    job=JOBS[jid];opts=job['options']['jianying'];videos=job['options']['jianyingVideos'];results=job.setdefault('jianyingResults',[])
-    root=Path(opts['output'] or str(Path(cfg['output'])/'剪映工程'))
-    analysis_opts=track_sheets.options(STATE.get('trackSheetOptions',{}))
-    for index,video in enumerate(videos):
-        telemetry.batch(job,'jianying_projects','剪映真实工程',len(videos),index)
-        if job['cancel'].is_set():raise InterruptedError('工程导出已停止')
-        st=Path(video['path']).stat()
-        if video['inputStat']!={'bytes':st.st_size,'mtime':st.st_mtime_ns}:raise ValueError('工程输入视频已变化，请重新创建任务')
-        key='jianying:'+hashlib.sha256(video['path'].encode()).hexdigest()[:20]
-        old=next((r for r in results if r['sourcePath']==video['path']),None)
-        if old and cached(jid,key):
-            try:jianying_projects.check(old['directory']);continue
-            except (OSError,ValueError):pass
-        progress={'phase':None,'last':0,'tid':None}
-        def notify(phase,value,length):
-            if job['cancel'].is_set():raise InterruptedError('工程导出已停止')
-            if phase=='backend':return
-            now=time.monotonic()
-            if progress['phase']==phase and now-progress['last']<.5 and value!=length:return
-            if progress['phase']!=phase:
-                if progress['tid']:telemetry.finish(job,progress['tid'])
-                unit='bytes' if phase in ('copy','hash','assets') else 'clips' if phase in ('timeline','fragments') else 'captions' if phase=='captions' else 'seconds' if phase=='asr' else 'files' if phase in ('audio','draft','cache','cpu_fallback') else 'frames'
-                progress['tid']=telemetry.begin(job,'剪映工程 · '+phase,video['name'],length or 0,unit)
-            progress.update(phase=phase,last=now)
-            if isinstance(value,(int,float)) and isinstance(length,(int,float)):telemetry.advance(job,progress['tid'],value,length)
-            stage(jid,f'{index+1}/{len(videos)} · 剪映工程 · {video["name"]} · '+{'copy':'复制素材','audio':'提取原声','draft':'保存草稿','decode':'分析镜头','hash':'核对素材','cache':'复用镜头分析','assets':'复制附加素材','timeline':'建立画面片段与运镜','captions':'建立字幕轨','fragments':'生成独立视频切片','separate':'分离人声与背景声','asr':'识别语音和字幕时间码','cpu_fallback':'GPU 不兼容，正在用新进程尝试 CPU'}.get(phase,'分析视频'),index/len(videos)*90)
-        run=lambda args,observe=None,timeout=None:run_process(args,jid,observe=observe,timeout=timeout)
-        if opts['splitScenes']:
-            analysis,_,_=track_sheets.analyze(video,analysis_opts,DATA/'track-sheet-cache',FFMPEG,run,job['cancel'],notify)
-        else:analysis={'sourceSHA256':track_sheets.source_hash(Path(video['path']),job['cancel'],notify),'segments':[{'start':0,'end':video['duration']}]}
-        import jianying_ai
-        runtime_opts=jianying_ai.runtime_options(opts,cfg)
-        result=jianying_projects.generate(video,analysis,root,FFMPEG,run,job['cancel'],notify,opts=runtime_opts)
-        if progress['tid']:telemetry.finish(job,progress['tid'])
-        telemetry.batch(job,'jianying_projects','剪映真实工程',len(videos),index+1)
-        for warning in result.get('warnings',[]):log(warning,level='warning',job=jid)
-        result.update(projectId=video['projectId'],sourcePath=video['path']);p=get_project(video['projectId'])
-        with LOCK:
-            register(p,Path(result['path']),'剪映真实工程',jid);register(p,Path(result['manifest']),'剪映工程清单',jid)
-            results[:]=[r for r in results if r['sourcePath']!=video['path']];results.append(result)
-            checkpoint(jid,key,[x for x in Path(result['directory']).rglob('*') if x.is_file()]);persist_jobs()
-    job['result']={'completed':len(results),'degraded':sum(bool(r.get('timeline',{}).get('degraded')) for r in results),'files':[r['path'] for r in results],'editorValidated':False}
-    if 'jianying_project' not in job['completedStages']:job['completedStages'].append('jianying_project')
+    import jianying_jobs
+    return jianying_jobs.run(sys.modules[__name__],cfg,jid)
 
 
 def project_dir(p, cfg):
@@ -1715,8 +1682,13 @@ def create_job(body, *, config=None, flow_id=None, operation_id=None):
             continued_video_files(options,pid)
     if kind=='jianying_project':
         options,_=jianying_request(body)
-        if not jianying_projects.status(options['jianying'])['available']:raise ValueError('剪映草稿组件未安装')
-        with LOCK:STATE['jianyingOptions']=copy.deepcopy(options['jianying']);save()
+        editor=jianying_projects.status(options['jianying'])
+        if not editor['available']:raise ValueError('剪映工程组件缺失，请使用包含该组件的完整安装包')
+        if options['autoDiagram'] and not editor['editorInstalled']:raise ValueError('没有找到可用的官方剪映，请安装剪映后重试；已配置的技术参数无需逐项填写')
+        with LOCK:
+            STATE['jianyingOptions']=copy.deepcopy(options['jianying'])
+            if options['autoDiagram']:STATE['jianyingCustom']=not options['automatic']
+            save()
     elif kind=='track_sheet':
         options,_=track_request(body)
         plan=track_plan(body)
@@ -2087,7 +2059,9 @@ class Handler(BaseHTTPRequestHandler):
                     with LOCK:row['editorImport']=imported;save()
                 association=evidence_association(body|{'projectId':row['projectId']})
                 with LOCK:STATE['jianyingOptions']=opts;save()
-                return self.reply(value=evidence_manager().auto_capture(row['projectId'],body,association,imported,opts))
+                def completed(item):
+                    with LOCK:row['diagram']=item;persist_jobs()
+                return self.reply(value=evidence_manager().auto_capture(row['projectId'],body,association,imported,opts,on_complete=completed))
             if path=='/api/project-evidence/import':
                 association=evidence_association(body)
                 return self.reply(value=evidence_manager().import_images(association['projectId'],body,association))
@@ -2107,6 +2081,16 @@ class Handler(BaseHTTPRequestHandler):
                 opts=jianying_projects.options(body.get('jianying',STATE.get('jianyingOptions',{})))
                 runtime_opts=jianying_ai.runtime_options(opts,STATE['config'])
                 return self.reply(value=jianying_projects.status(opts)|{'ai':jianying_ai.availability(runtime_opts)})
+            if path=='/api/jianying/options':
+                custom=body.get('custom',False);preferences=body.get('options',{})
+                if type(custom) is not bool:raise ValueError('工程图方案无效')
+                if not isinstance(preferences,dict):raise ValueError('工程图设置无效')
+                if custom:opts=jianying_projects.options(preferences)
+                else:
+                    import jianying_jobs
+                    opts=jianying_jobs.automatic_options(preferences,STATE['config'])
+                with LOCK:STATE['jianyingOptions']=opts;STATE['jianyingCustom']=custom;save()
+                return self.reply(value={'saved':True,'custom':custom,'options':opts})
             if path in ('/api/jianying/install','/api/jianying/launch','/api/jianying/auto-open'):
                 job,row=editor_result(body)
                 opts=jianying_projects.options(body.get('options',STATE.get('jianyingOptions',{})))

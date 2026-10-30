@@ -4,33 +4,35 @@ import hashlib
 import math
 import re
 import json
+import random
+import bisect
 import jianying_ai
 import jianying_editing
 
 
-DEFAULTS = {'timelineMode':'detailed','shotSeconds':6,'cameraMotion':True,
+DEFAULTS = {'timelineMode':'detailed','shotSeconds':10,'cameraMotion':True,
             'originalVolume':1.0,'subtitlePath':'','subtitleStyle':'bold',
             'musicPath':'','musicVolume':0.15,'soundEffectPath':'','soundEffectVolume':0.35,
             'soundEffectEvery':4,'mouseOpen':False,
             'editProfile':'cinema','colorAdjust':True,'cutMaterials':True,'speedPattern':'original',
             'transition':'dissolve','filterStyle':'cinema','filterIntensity':25,'visualEffect':'','overlayText':'',
             'audioMode':'separate','captionMode':'auto','aiPython':'','aiModelRoot':'','aiDevice':'auto',
-            'aiFailure':'keep','asrLanguage':'zh','separationModel':'htdemucs','captionLength':14,
-            'materialLibrary':'','mood':'auto','duckMusic':True,'registerIndex':True,'timelineZoom':2,'previewBeforeCapture':False}
+            'aiFailure':'keep','cudaLibraries':'auto','asrLanguage':'zh','separationModel':'htdemucs','captionLength':14,
+            'materialLibrary':'','mood':'auto','addBgm':False,'adjustTrack':True,'duckMusic':True,'registerIndex':True,'timelineZoom':2,'previewBeforeCapture':False}
 AUDIO_EXT = {'.mp3','.wav','.m4a','.aac','.flac','.ogg','.opus','.wma'}
 
 
 def options(value):
-    out=DEFAULTS|value
+    out=DEFAULTS|{'addBgm':bool(value.get('musicPath'))}|value
     if out['timelineMode'] not in ('basic','detailed'):raise ValueError('请选择基础工程或完整剪辑工程')
     if out['subtitleStyle'] not in ('plain','bold','yellow'):raise ValueError('字幕样式无效')
     for key,choices in {'editProfile':set(jianying_editing.PROFILES),'speedPattern':{'original','gentle'},
                         'transition':{'none','dissolve'},'filterStyle':{'none','cinema'},'audioMode':{'original','separate'},
-                        'captionMode':{'srt','auto','none'},'aiDevice':{'auto','cpu'},'aiFailure':{'keep','stop'},
+                        'captionMode':{'srt','auto','none'},'aiDevice':{'auto','cpu'},'aiFailure':{'keep','stop'},'cudaLibraries':{'auto','torch','nvidia'},
                         'asrLanguage':{'','zh','en','ja','ko'},'separationModel':{'htdemucs','htdemucs_ft','mdx_extra'},
                         'mood':{'auto',*jianying_editing.MOODS},'visualEffect':{'','_1998','_70s'}}.items():
         if not isinstance(out[key],str) or out[key] not in choices:raise ValueError('剪映工程选项无效：'+key)
-    for name in ('cameraMotion','mouseOpen','colorAdjust','cutMaterials','duckMusic','registerIndex','previewBeforeCapture'):
+    for name in ('cameraMotion','mouseOpen','colorAdjust','cutMaterials','addBgm','adjustTrack','duckMusic','registerIndex','previewBeforeCapture'):
         if type(out[name]) is not bool:raise ValueError('剪映自动化选项无效')
     labels={'shotSeconds':'单片段最长秒数','originalVolume':'原声音量','musicVolume':'背景音乐音量','soundEffectVolume':'音效音量','filterIntensity':'滤镜强度'}
     for name,low,high in [('shotSeconds',2,30),('originalVolume',0,2),('musicVolume',0,1),('soundEffectVolume',0,1),('filterIntensity',0,100)]:
@@ -52,15 +54,9 @@ def input_snapshots(video,opts):
     subtitle=Path(opts['subtitlePath']) if opts['subtitlePath'] else Path(video['path']).with_suffix('.srt')
     if opts['captionMode']!='none' and (opts['subtitlePath'] or subtitle.is_file()):paths.append((subtitle,{'.srt'},'字幕'))
     for key,label in [('musicPath','背景音乐'),('soundEffectPath','音效')]:
+        if key=='musicPath' and not opts['addBgm']:continue
         if opts[key]:paths.append((Path(opts[key]),AUDIO_EXT,label))
-    if opts['materialLibrary']:
-        root=Path(opts['materialLibrary'])
-        for kind in ('bgm','sfx'):
-            folder=root/kind
-            key='musicPath' if kind=='bgm' else 'soundEffectPath'
-            if folder.is_dir() and not opts[key]:
-                files=jianying_editing.select_materials(jianying_editing.library_files(folder),video['name'],opts['mood'],1 if kind=='bgm' else 8)
-                paths.extend((p,AUDIO_EXT,'素材库') for p in files)
+    for files in video.get('jianyingLibraryFiles',{}).values():paths.extend((Path(p),AUDIO_EXT,'剪映声音素材') for p in files)
     result={}
     for path,allowed,label in paths:
         if path.suffix.lower() not in allowed or not path.is_file():raise ValueError(label+'文件不可读取，请重新选择')
@@ -87,27 +83,53 @@ def file_hash(path,event):
     return digest.hexdigest()
 
 
-def ranges(segments,duration,opts):
-    result=[]
-    limit=round(opts['shotSeconds']*1e6) if opts['timelineMode']=='detailed' else duration
+def ranges(segments,duration,opts,*,seed=''):
+    scenes=[]
     for item in segments:
         a,b=float(item['start']),float(item['end'])
         if not math.isfinite(a) or not math.isfinite(b):raise ValueError('分镜时间码无效')
         start=max(0,round(a*1e6));end=min(duration,round(b*1e6))
-        while end>start:
-            stop=min(end,start+limit)
-            result.append({'start':start,'duration':stop-start,'sourceStart':start})
-            start=stop
-            if len(result)>5000:raise ValueError('剪辑片段超过5000个，请增大片段时长或分批处理')
-    if not result or result[0]['start']!=0 or result[-1]['start']+result[-1]['duration']!=duration:
+        if end>start:scenes.append({'start':start,'duration':end-start,'sourceStart':start})
+    if not scenes or scenes[0]['start']!=0 or scenes[-1]['start']+scenes[-1]['duration']!=duration:
         raise ValueError('视频分段未覆盖完整时间线')
-    if any(a['start']+a['duration']!=b['start'] for a,b in zip(result,result[1:])):raise ValueError('时间线存在间隙或重叠')
+    if any(a['start']+a['duration']!=b['start'] for a,b in zip(scenes,scenes[1:])):raise ValueError('时间线存在间隙或重叠')
+    result=scenes if opts['timelineMode']!='detailed' else bounded_cuts(scenes,duration,round(opts['shotSeconds']*1e6),seed)
+    if len(result)>5000:raise ValueError('剪辑片段超过5000个，请增大片段时长或分批处理')
     cursor=0
     for i,item in enumerate(result):
         source_duration=item['duration']
         speed=(.98,1.02,1.)[i%3] if opts['speedPattern']=='gentle' and opts['timelineMode']=='detailed' else 1.
         item.update(start=cursor,sourceDuration=source_duration,duration=round(source_duration/speed))
         cursor+=item['duration']
+    return result
+
+
+def bounded_cuts(scenes,duration,maximum,seed):
+    """Seeded lengths with complete coverage; nearby scene cuts are soft anchors."""
+    minimum=2000000
+    if duration<minimum:return [{'start':0,'duration':duration,'sourceStart':0}]
+    least=(duration+maximum-1)//maximum;most=min(5000,duration//minimum)
+    if least>5000:raise ValueError('剪辑片段超过5000个，请增大片段时长或分批处理')
+    if least>most:raise ValueError('当前视频时长无法同时满足至少2秒和所设最长秒数，请提高单片段最长秒数')
+    rng=random.Random(str(seed))
+    target=rng.uniform(minimum+(maximum-minimum)*.35,minimum+(maximum-minimum)*.65)
+    count=max(least,min(most,math.floor(duration/target+.5)))
+    anchors=[s['start'] for s in scenes[1:]]
+    result=[];start=0
+    for remaining in range(count,0,-1):
+        left=duration-start
+        if remaining==1:stop=duration
+        else:
+            # Reserve enough time for every remaining cut, including the tail.
+            low=max(minimum,left-(remaining-1)*maximum)
+            high=min(maximum,left-(remaining-1)*minimum)
+            stop=start+rng.randint(low,high)
+            position=bisect.bisect_left(anchors,stop)
+            nearby=[x for x in anchors[max(0,position-1):position+1]
+                    if start+low<=x<=start+high and abs(x-stop)<=650000]
+            if nearby:stop=min(nearby,key=lambda x:abs(x-stop))
+        result.append({'start':start,'duration':stop-start,'sourceStart':start})
+        start=stop
     return result
 
 
@@ -204,7 +226,17 @@ def add_tracks(draft,script,video,resources,assets,cuts,duration,opts,ffmpeg,run
                 spans=list(zip(boundaries,boundaries[1:])) if label=='人声' else [(0,source_duration)]
                 for a,b in spans:clips.extend(jianying_editing.mapped_intervals(a,min(b,stem.duration),cuts))
                 if len(clips)>10000:raise ValueError('分离音轨超过10000段，请分集处理')
-                count=append_audio(draft,script,stem,label,clips,opts['originalVolume'])
+                if label=='背景声' and len(clips)>=4:
+                    # Both native reference projects partition one background
+                    # WAV across two tracks. Each interval is used once.
+                    seed=assets[0]['sha256']
+                    secondary=set(sorted(range(len(clips)),key=lambda i:hashlib.sha256((seed+':background:'+str(i)).encode()).hexdigest())[:max(1,len(clips)//8)])
+                    primary_clips=[clip for i,clip in enumerate(clips) if i not in secondary]
+                    secondary_clips=[clip for i,clip in enumerate(clips) if i in secondary]
+                    count=append_audio(draft,script,stem,label,primary_clips,opts['originalVolume'])
+                    count+=append_audio(draft,script,stem,'背景声2',secondary_clips,opts['originalVolume'])
+                    result['backgroundTracks']=2;result['auxiliaryBackgroundSegments']=len(secondary_clips)
+                else:count=append_audio(draft,script,stem,label,clips,opts['originalVolume'])
                 result['vocalSegments' if label=='人声' else 'backgroundSegments']=count
                 assets.append({'relative':path.relative_to(resources.parent).as_posix(),'sha256':file_hash(path,event),'bytes':path.stat().st_size})
         else:
@@ -215,14 +247,21 @@ def add_tracks(draft,script,video,resources,assets,cuts,duration,opts,ffmpeg,run
         notify('audio',1,1)
     else:result['warnings'].append('输入视频没有音轨，未生成原声轨')
     pools={}
-    if opts['materialLibrary']:
+    if video.get('jianyingLibraryFiles') is not None:
+        frozen=video['jianyingLibraryFiles']
+        pools={'musicPath':[Path(p) for p in frozen['bgm']],'soundEffectPath':[Path(p) for p in frozen['sfx']]}
+        result['materialSelection']=video.get('jianyingMaterialReport',{})|{'bgmEnabled':opts['addBgm']}
+        if not opts['soundEffectPath'] and not pools['soundEffectPath']:
+            result['warnings'].append('剪映缓存中未找到可用短音效，本集不添加音效；下载音效后可用于后续工程')
+    elif opts['materialLibrary']:
         for kind,key in [('bgm','musicPath'),('sfx','soundEffectPath')]:
             folder=Path(opts['materialLibrary'])/kind
             files=jianying_editing.library_files(folder) if folder.is_dir() else []
             if video.get('jianyingAssets') is not None:files=[p for p in files if str(p.resolve()) in video['jianyingAssets']]
-            pools[key]=jianying_editing.select_materials(files,video['name'],opts['mood'],1 if kind=='bgm' else 8)
+            pools[key]=jianying_editing.select_materials(files,video.get('projectName','')+' '+video['name'],opts['mood'],1 if kind=='bgm' else 8)
             if not files and not opts[key]:result['warnings'].append('素材库 '+kind+' 没有可用音频，未添加对应轨道')
     for key,label in [('musicPath','背景音乐'),('soundEffectPath','转场音效')]:
+        if key=='musicPath' and not opts['addBgm']:continue
         sources=[Path(opts[key])] if opts[key] else pools.get(key,[])
         if not sources:continue
         if event.is_set():raise InterruptedError('工程导出已停止')
@@ -264,7 +303,7 @@ def add_tracks(draft,script,video,resources,assets,cuts,duration,opts,ffmpeg,run
             script.add_segment(clip,'字幕');notify('captions',index+1,len(cues))
         result['captionSegments']=len(cues)
     elif opts['captionMode']!='none':result['warnings'].append('没有可用 SRT 或识别文字，未生成可编辑字幕；画面中的原有字幕保持原样')
-    if not opts['musicPath'] and not pools.get('musicPath'):result['warnings'].append('没有可用背景音乐，未添加配乐轨')
+    if opts['addBgm'] and not opts['musicPath'] and not pools.get('musicPath'):result['warnings'].append('已开启配乐，但剪映缓存中没有100秒以上的可用音乐，未添加配乐轨')
     return result
 
 
@@ -286,3 +325,12 @@ def validate_media_paths(folder,data,index):
                 raise ValueError('工程轨道时间码存在重叠、越界或空片段')
             if str(segment.get('material_id','')) not in materials:raise ValueError('工程轨道引用了未登记的素材')
             end=start+length
+
+
+def validate_complete(video,opts,timeline):
+    if opts['timelineMode']!='detailed' or opts['aiFailure']!='stop' or not video.get('audio'):return
+    missing=[];ai=timeline.get('ai',{})
+    if opts['audioMode']=='separate' and (ai.get('separation')!='completed' or not timeline.get('vocalSegments') or not timeline.get('backgroundSegments')):
+        missing.append('独立人声和背景声')
+    if opts['captionMode']!='none' and not timeline.get('captionSegments'):missing.append('可编辑对白字幕（没有识别到有效文字）')
+    if missing:raise ValueError('完整剪映工程缺少：'+'、'.join(missing)+'；本集未记为完成，请核对引擎日志后重试')

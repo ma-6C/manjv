@@ -17,6 +17,9 @@
 /.aws/
 /.venv/
 /venv/
+/engines/vsr-env/
+/engines/video-subtitle-remover/
+/engines/vsr-install.json
 
 # Runtime dependencies and caches
 **/__pycache__/
@@ -80,3 +83,5 @@ jobs.json
 *.onnx
 *.safetensors
 *.ckpt
+*.th
+*.whl

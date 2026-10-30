@@ -51,6 +51,7 @@ def failure(job,error,redact=safe_text,trace=''):
     code,action='TASK_FAILED','根据下方原始报错核对当前步骤；修正后重试未完成部分。'
     rules=[
         ('CUDA_COMPATIBILITY',('no kernel image is available','invalid device function','not compatible with the current pytorch','cuda driver version is insufficient'),'当前显卡与引擎的 PyTorch/CUDA 不兼容。在 AI 去字幕设置中将 STTN 推理设备改为 CPU；使用 GPU 需要匹配显卡型号的运行环境。'),
+        ('CUDA_LIBRARIES',('winerror 127','cuda 运行库加载失败','nvidia cuda 独立包','所选 cuda 运行库缺少'),'在工程图的本页设置中切换 GPU 运行库，或安装与当前 PyTorch 配套的 cuBLAS/cuDNN；修正后重试未完成部分。'),
         ('DISK_SPACE',('no space left','disk full','errno 28','磁盘空间不足','not enough space'),'清理输出磁盘，或在制作设置中更换输出目录，再重试未完成部分。'),
         ('MEMORY',('out of memory','cuda out of memory','cannot allocate memory','显存不足'),'降低并行数或修复批次大小；显存不足时可切换 CPU，再重试当前视频。'),
         ('FILE_MISSING',('no such file','filenotfounderror','系统找不到指定的文件','文件不存在','素材已修改或移动'),'核对下方文件名和路径，恢复缺失文件或重新选择素材。'),
@@ -64,15 +65,18 @@ def failure(job,error,redact=safe_text,trace=''):
         ('NETWORK',('timed out','timeout','connection refused','connection reset','urlerror','超时','网络连接'),'检查网络、服务地址和引擎状态；云端任务先核对原任务，再继续查询。'),
     ]
     for key,needles,hint in rules:
+        if key=='CUDA_LIBRARIES' and job.get('kind')!='jianying_project' and not any(x in text for x in ('cuda','cudnn','cublas')):continue
         if any(needle in text for needle in needles):code,action=key,hint;break
     if isinstance(error,ProcessFailure) and error.timed_out:
         code,action='PROCESS_TIMEOUT','当前外部程序超过等待上限。核对原始输出和运行环境后重试当前步骤。'
-    summary={'CUDA_COMPATIBILITY':'当前显卡与 AI 引擎的 PyTorch/CUDA 不兼容。','DISK_SPACE':'输出磁盘空间不足。','MEMORY':'处理引擎报告内存或显存不足。','FILE_MISSING':'处理所需的文件或目录不存在。',
+    if code=='CUDA_COMPATIBILITY' and job.get('kind')=='jianying_project':
+        action='在工程图的本页设置中将 AI 推理设备改为 CPU，或安装支持当前显卡架构的 PyTorch/CUDA 引擎；仅替换 cuBLAS/cuDNN 不能补齐显卡内核。'
+    summary={'CUDA_COMPATIBILITY':'当前显卡与 AI 引擎的 PyTorch/CUDA 不兼容。','CUDA_LIBRARIES':'所选 GPU 运行库缺失或与 AI 引擎不兼容。','DISK_SPACE':'输出磁盘空间不足。','MEMORY':'处理引擎报告内存或显存不足。','FILE_MISSING':'处理所需的文件或目录不存在。',
         'PERMISSION':'处理程序没有文件访问权限。','DEPENDENCY':'引擎缺少模块或运行库。','AUTH':'接口认证未通过。',
         'FILTER':'媒体滤镜未能初始化。','ENCODER':'视频编码器未能正常启动。','PARAMETER':'媒体命令中的参数未被接受。','NETWORK':'连接或服务响应异常。',
         'PROCESS_TIMEOUT':'外部处理程序超过等待上限。','MEDIA_OUTPUT':'生成的视频不完整或无法正常解码。'}.get(code,'当前步骤执行失败，原始报错如下。')
     t=snapshot(job);row=t.get('current') or {}
-    stage=job.get('stage')
+    stage=getattr(error,'stage','') or job.get('stage')
     if not stage or stage=='任务失败':stage=t.get('phase') or row.get('label') or '未记录失败阶段'
     reason=(error_excerpt(detail) or error_excerpt(raw)) if isinstance(error,ProcessFailure) else error_excerpt(raw)
     if code=='CUDA_COMPATIBILITY':
@@ -229,6 +233,9 @@ def report(job):
     return {'format':2,'product':'ManjuStudio','taskId':job['id'],'kind':job['kind'],'status':job['status'],
         'created':job.get('created'),'finished':job.get('finished'),'runSeconds':job.get('runSeconds',0),
         'measurements':rows,'encoding':{k:job.get('encoding',{}).get(k) for k in ('videoEncoder','threadsPerVideo','regroupMode','planVersion','gpuRequested','fallbackCode','fallbackReason','probeProfile')},
+        'jianyingAI':[{k:exported(event[k]) if isinstance(event[k],str) else event[k] for k in
+            ('time','action','event','attempt','video','stage','device','provider','requested','elapsedSeconds','frames','captions','error','code','nextStep') if k in event}
+            |{'versions':event.get('libraries',{}).get('versions',{})} for event in job.get('jianyingAI',[])],
         'recovery':recover,
         'failure':failed,
         'cloudStatus':remote.get('status'),'hasCloudTaskId':bool(remote.get('taskId')),

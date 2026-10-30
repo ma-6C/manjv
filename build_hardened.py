@@ -9,7 +9,7 @@ if not re.fullmatch(r'v\d+\.\d+\.\d+',version):raise ValueError('版本号无效
 STAGE=ROOT/('tmp/hardened-stage-'+version);STAGE.mkdir(parents=True,exist_ok=True)
 DIST=ROOT/'release'/version/'漫剧工坊'
 if (DIST/'data').exists():raise RuntimeError('构建目录含用户数据，请改用新的版本目录')
-MODULES=['server','ai_providers','api_connections','media_download','engine_bridge','licensing','win_security','release_key','runtime_paths','file_picker','local_session','engine_manager','promotions','task_progress','hongguo_source','guoapp_source','official_hongguo_share','source_imports','episode_selection','gpu_encoding','transform_tools','track_sheets','jianying_projects','jianying_timeline','jianying_ai','jianying_editing','jianying_registry','highlight_render','vsr_pool','lama_local','publish_materials','publish_workflow','publish_browser','project_evidence','studio_flow','studio_flow_adapter','jianying_automation']
+MODULES=['server','ai_providers','api_connections','media_download','engine_bridge','licensing','win_security','release_key','runtime_paths','file_picker','local_session','engine_manager','promotions','task_progress','hongguo_source','guoapp_source','official_hongguo_share','source_imports','episode_selection','gpu_encoding','transform_tools','track_sheets','jianying_projects','jianying_timeline','jianying_ai','jianying_editing','jianying_registry','jianying_jobs','jianying_materials','jianying_library','jianying_visual','highlight_render','vsr_pool','lama_local','publish_materials','publish_workflow','publish_browser','project_evidence','studio_flow','studio_flow_adapter','jianying_automation']
 for module in MODULES:shutil.copy2(ROOT/(module+'.py'),STAGE/(module+'.py'))
 shutil.copy2(ROOT/'desktop.py',STAGE/'desktop.py')
 imports=set()
@@ -34,7 +34,7 @@ for folder in ['web','assets']:args+=['--add-data',str(ROOT/folder)+os.pathsep+f
 args+=['--add-data',str(ROOT/'engines/guoapp-core')+os.pathsep+'engines/guoapp-core']
 args+=['--add-data',str(ROOT/'engines/jianying-draft')+os.pathsep+'engines/jianying-draft']
 for folder in ['uploader','utils','conf.py','LICENSE']:args+=['--add-data',str(ROOT/'engines/social-auto-upload'/folder)+os.pathsep+('engines/social-auto-upload' if '.' in folder or folder=='LICENSE' else 'engines/social-auto-upload/'+folder)]
-for module in ['webview','pythonnet','clr_loader','imageio_ffmpeg','patchright','segno','cv2','loguru','pyJianYingDraft','pymediainfo','imageio','uiautomation','comtypes']:args+=['--collect-all',module]
+for module in ['webview','pythonnet','clr_loader','imageio_ffmpeg','patchright','segno','cv2','loguru','pyJianYingDraft','pymediainfo','imageio','uiautomation','comtypes','winrt']:args+=['--collect-all',module]
 for module in MODULES+['webview.platforms.edgechromium','webview.platforms.winforms','package_imports']:args+=['--hidden-import',module]
 run(args)
 for cached in list(DIST.rglob('*.pyc')):

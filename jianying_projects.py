@@ -4,6 +4,9 @@ import hashlib,json,os,re,shutil,time,uuid,importlib.metadata
 import ctypes,subprocess,threading
 import jianying_timeline
 import jianying_editing
+import jianying_materials
+import jianying_library
+import jianying_ai
 import math
 
 _IMPORT_LOCK=threading.Lock()
@@ -155,12 +158,13 @@ def _editor_candidates():
     return list(dict.fromkeys(str(p) for p in candidates))
 
 def _draft_roots(opts,editor=None):
-    defaults=[]
+    native=Path(os.environ.get('LOCALAPPDATA',str(Path.home()/'AppData/Local')))/'JianyingPro'/'User Data'/'Projects'/'com.lveditor.draft'
+    defaults=[native] if (native/'root_meta_info.json').is_file() else []
     if editor:
         parent=Path(editor['path']).parent
         defaults.extend(candidate for base in (parent,parent.parent,parent.parent.parent)
                         if (candidate:=base/'JianyingPro Drafts').is_dir())
-    defaults.append(Path(os.environ.get('LOCALAPPDATA',str(Path.home()/'AppData/Local')))/'JianyingPro'/'User Data'/'Projects'/'com.lveditor.draft')
+    defaults.append(native)
     roots=([Path(opts['draftRoot'])] if opts['draftRoot'] else [])+defaults
     return list(dict.fromkeys(str(p.expanduser().resolve()) for p in roots))
 
@@ -196,6 +200,8 @@ def cancelled(event):
 def generate(video,analysis,root,ffmpeg,run,event,notify=lambda *a:None,opts=None):
     import pyJianYingDraft as draft
     opts=options(opts)
+    jianying_ai.preflight(video,opts)
+    if video.get('jianyingLibraryFiles') is None:jianying_materials.prepare(video,opts,{},event,notify)
     jianying_timeline.validate_snapshots(video)
     additional=jianying_timeline.input_snapshots(video,opts)
     cancelled(event);root=Path(root).resolve();root.mkdir(parents=True,exist_ok=True)
@@ -219,19 +225,28 @@ def generate(video,analysis,root,ffmpeg,run,event,notify=lambda *a:None,opts=Non
         material=draft.VideoMaterial(str(target),material_name=source.name)
         source_duration=min(round(video['duration']*1e6),material.duration)
         script.append_tracks([draft.TrackSpec(draft.TrackType.video,'画面剪辑')])
-        ranges=jianying_timeline.ranges(analysis['segments'],source_duration,opts)
+        seed=video.get('jianyingCutSeed') or analysis['sourceSHA256']
+        ranges=jianying_timeline.ranges(analysis['segments'],source_duration,opts,seed=seed)
+        lengths=[item['sourceDuration']/1e6 for item in ranges]
+        cut_plan={'version':1,'mode':'random' if opts['timelineMode']=='detailed' else 'scene','seed':seed,
+            'minSeconds':2,'maxSeconds':opts['shotSeconds'],'count':len(ranges),'shortSource':source_duration<2000000,
+            'actualMinSeconds':round(min(lengths),3),'actualMaxSeconds':round(max(lengths),3)}
+        notify('cut_plan',cut_plan,1)
         duration=ranges[-1]['start']+ranges[-1]['duration']
         for index,item in enumerate(ranges):
             cancelled(event);notify('timeline',index,len(ranges))
             span=draft.Timerange(item['start'],item['duration'])
             clip_material=material;source_span=draft.Timerange(item['sourceStart'],item['sourceDuration'])
             if opts['cutMaterials'] and opts['timelineMode']=='detailed':
-                notify('fragments',index,len(ranges));fragment=resources/('片段%04d.mp4'%(index+1))
+                prefix=re.sub(r'__\d+$','',video.get('projectName',''))
+                prefix=re.sub(r'[<>:"/\\|?*\x00-\x1f]','_',prefix).strip(' .')[:34]
+                fragment_name=((prefix+'-' if prefix else '')+safe[:24]+'_素材%02d.mp4'%(index+1))
+                notify('fragments',index,len(ranges));fragment=resources/fragment_name
                 run([str(ffmpeg),'-hide_banner','-loglevel','error','-nostdin','-y','-ss',str(item['sourceStart']/1e6),
                      '-i',str(target),'-map','0:v:0','-an','-vf','tpad=stop_mode=clone:stop_duration=0.1',
                      '-r','30','-frames:v',str(math.ceil(item['sourceDuration']/1e6*30)),
                      '-c:v','libx264','-preset','fast','-crf','18','-pix_fmt','yuv420p',str(fragment)],timeout=600)
-                clip_material=draft.VideoMaterial(str(fragment),material_name=source.stem+'-素材%04d.mp4'%(index+1))
+                clip_material=draft.VideoMaterial(str(fragment),material_name=fragment.name)
                 source_span=draft.Timerange(0,item['sourceDuration'])
                 if clip_material.duration<item['sourceDuration']:raise ValueError('切片输出不完整：'+fragment.name)
                 assets.append({'relative':fragment.relative_to(folder).as_posix(),'sha256':sha(fragment),'bytes':fragment.stat().st_size})
@@ -240,6 +255,7 @@ def generate(video,analysis,root,ffmpeg,run,event,notify=lambda *a:None,opts=Non
             script.add_segment(clip,'画面剪辑')
         notify('timeline',len(ranges),len(ranges))
         timeline=jianying_timeline.add_tracks(draft,script,video,resources,assets,ranges,duration,opts,ffmpeg,run,event,notify,source_duration)
+        jianying_timeline.validate_complete(video,opts,timeline)
         effects=jianying_editing.layers(draft,script,duration,ranges,opts)
         timeline.update({k:v for k,v in effects.items() if k!='resourceWarnings'});timeline['warnings']+=effects['resourceWarnings']
         timeline['degraded']=any(v=='failed' for v in timeline.get('ai',{}).values())
@@ -248,17 +264,25 @@ def generate(video,analysis,root,ffmpeg,run,event,notify=lambda *a:None,opts=Non
         cancelled(event);notify('draft',0,1);script.save()
         content=folder/'draft_content.json';data=json.loads(content.read_text('utf-8'))
         if data['duration']>duration+50000:raise ValueError('同名字幕超出视频时长，请先核对 SRT 时间码')
+        timeline['adjustTrackSegments']=jianying_editing.append_adjustment_track(data,data['duration'],opts['adjustTrack'] and opts['timelineMode']=='detailed')
+        timeline['adjustTrackNeutral']=bool(timeline['adjustTrackSegments'])
         meta_file=folder/'draft_meta_info.json';meta=json.loads(meta_file.read_text('utf-8'))
         meta.update(draft_id=data['id'],draft_name=name,draft_fold_path=str(folder),draft_root_path=str(root),tm_duration=duration,draft_cover=str(cover))
+        library=jianying_library.write(folder,data,meta)
+        text=json.dumps(data,ensure_ascii=False,indent=2)
+        content.write_text(text,'utf-8')
+        (folder/'draft_info.json').write_text(text,'utf-8')
         meta_file.write_text(json.dumps(meta,ensure_ascii=False,indent=2),'utf-8')
         manifest={'format':1,'product':'ManjuStudio','kind':'jianying_project','name':name,'sourceName':source.name,'sourceSHA256':digest.hexdigest(),
-                  'durationUs':duration,'ranges':ranges,'tracks':[{'name':t.get('name'),'type':t['type'],'segments':len(t.get('segments',[]))} for t in data['tracks']],
-                  'assets':assets,'timeline':timeline,'draftSHA256':sha(content),'editorValidated':False,'createdAt':time.time(),'component':status()['version'],
+                  'durationUs':duration,'ranges':ranges,'cutPlan':cut_plan,'tracks':[{'name':t.get('name'),'type':t['type'],'segments':len(t.get('segments',[]))} for t in data['tracks']],
+                  'assets':assets,'timeline':timeline,'library':library,'draftSHA256':sha(content),
+                  'draftInfoSHA256':sha(folder/'draft_info.json'),'metadataSHA256':sha(meta_file),
+                  'virtualStoreSHA256':sha(folder/'draft_virtual_store.json'),'editorValidated':False,'createdAt':time.time(),'component':status()['version'],
                   'note':'重新剪辑的实际工程。素材已复制到 Resources；移动目录后需要在工具内重新定位素材，或在剪映手动重连。'}
         index=folder/'manju_project.json';index.write_text(json.dumps(manifest,ensure_ascii=False,indent=2),'utf-8')
         check(folder);cancelled(event);incomplete.unlink();notify('draft',1,1)
         return {'directory':str(folder),'path':str(content),'manifest':str(index),'name':name,'duration':duration/1e6,'tracks':len(data['tracks']),
-                'segments':len(ranges),'timeline':timeline,'warnings':timeline['warnings'],'sourceSHA256':digest.hexdigest(),'draftSHA256':sha(content),'manifestSHA256':sha(index),'editorValidated':False}
+                'segments':len(ranges),'cutPlan':cut_plan,'timeline':timeline,'library':library,'warnings':timeline['warnings'],'sourceSHA256':digest.hexdigest(),'draftSHA256':sha(content),'manifestSHA256':sha(index),'editorValidated':False}
     except BaseException:
         # Keep incomplete work visible for diagnosis, never mark it as completed.
         raise
@@ -270,8 +294,12 @@ def check(folder,*,validate_paths=True):
         path=(folder/item['relative']).resolve()
         if not path.is_relative_to(folder) or not path.is_file() or sha(path)!=item['sha256']:raise ValueError('工程素材缺失或校验失败')
     if sha(folder/'draft_content.json')!=index['draftSHA256']:raise ValueError('草稿内容已变化，请在剪映核对后重新登记')
+    for key,name in (('draftInfoSHA256','draft_info.json'),('metadataSHA256','draft_meta_info.json'),('virtualStoreSHA256','draft_virtual_store.json')):
+        if index.get(key) and (not (folder/name).is_file() or sha(folder/name)!=index[key]):raise ValueError('草稿素材库或主文件已变化，请重新核对：'+name)
     if validate_paths and index.get('timeline'):
-        jianying_timeline.validate_media_paths(folder,json.loads((folder/'draft_content.json').read_text('utf-8')),index)
+        data=json.loads((folder/'draft_content.json').read_text('utf-8'))
+        jianying_timeline.validate_media_paths(folder,data,index)
+        if index.get('library'):jianying_library.validate(folder,data,json.loads((folder/'draft_meta_info.json').read_text('utf-8')),index)
     return index
 
 def relocate(folder):
@@ -284,11 +312,15 @@ def relocate(folder):
             if name in mapping:material['path']=mapping[name]
     backup=content.with_suffix('.before-relink.json')
     if not backup.exists():shutil.copy2(content,backup)
-    content.write_text(json.dumps(data,ensure_ascii=False,indent=2),'utf-8');index['draftSHA256']=sha(content)
-    (folder/'manju_project.json').write_text(json.dumps(index,ensure_ascii=False,indent=2),'utf-8')
+    text=json.dumps(data,ensure_ascii=False,indent=2)
+    content.write_text(text,'utf-8');index['draftSHA256']=sha(content)
+    if index.get('draftInfoSHA256'):
+        (folder/'draft_info.json').write_text(text,'utf-8');index['draftInfoSHA256']=sha(folder/'draft_info.json')
     meta=folder/'draft_meta_info.json';value=json.loads(meta.read_text('utf-8'));value.update(draft_fold_path=str(folder),draft_root_path=str(folder.parent))
     if (folder/'Resources/封面.jpg').is_file():value['draft_cover']=str(folder/'Resources/封面.jpg')
     meta.write_text(json.dumps(value,ensure_ascii=False,indent=2),'utf-8')
+    if index.get('metadataSHA256'):index['metadataSHA256']=sha(meta)
+    (folder/'manju_project.json').write_text(json.dumps(index,ensure_ascii=False,indent=2),'utf-8')
     check(folder);return {'directory':str(folder),'relinked':True}
 
 def _safe_draft_root(value):
@@ -308,6 +340,7 @@ def install_to_editor(folder,opts=None,*,operation_id=None):
     root=_safe_draft_root(status(opts)['draftRoot'])
     if root==source or root.is_relative_to(source):raise ValueError('剪映草稿目录不能放在源工程内部')
     files=['draft_content.json','draft_meta_info.json','manju_project.json']
+    if index.get('library'):files+=['draft_info.json','draft_virtual_store.json']
     names=[]
     for asset in index['assets']:
         relative=Path(asset['relative']);path=(source/relative).resolve()
@@ -321,7 +354,13 @@ def install_to_editor(folder,opts=None,*,operation_id=None):
     with _IMPORT_LOCK:
         if operation_id:
             if not isinstance(operation_id,str) or not re.fullmatch(r'[a-zA-Z0-9_-]{1,100}',operation_id):raise ValueError('工程交接编号无效')
-            name=safe+'_流程_'+operation_id
+            # Chinese-only Windows OCR often reads c/ff as punctuation or a
+            # Chinese glyph. A stable 15-digit token retains the same 48 bits
+            # of identity and is legible in the editor's small title strip.
+            number=str(int(hashlib.sha256(operation_id.encode()).hexdigest()[:12],16)).zfill(15)
+            name=safe+'_工程_'+number
+            legacy=root/(safe+'_流程_'+operation_id)
+            if legacy.exists():name=legacy.name
         else:name=safe+'_导入_'+time.strftime('%Y%m%d-%H%M%S')+'_'+uuid.uuid4().hex[:6]
         target=root/name
         if target.exists() and operation_id:
@@ -337,17 +376,22 @@ def install_to_editor(folder,opts=None,*,operation_id=None):
         dst.parent.mkdir(parents=True,exist_ok=True)
         with src.open('rb') as stream,dst.open('xb') as output:shutil.copyfileobj(stream,output,2*1024**2)
     # Check copied bytes before modifying the copied draft's own paths and IDs.
-    copied=check(target)
+    # The copied JSON still points into the source export until relocate().
+    # Verify copied bytes now and validate destination media paths afterwards.
+    copied=check(target,validate_paths=False)
     relocate(target)
     content=target/'draft_content.json';draft=json.loads(content.read_text('utf-8'))
     draft['id']=str(uuid.uuid4()).upper()
-    content.write_text(json.dumps(draft,ensure_ascii=False,indent=2),'utf-8')
+    text=json.dumps(draft,ensure_ascii=False,indent=2);content.write_text(text,'utf-8')
+    if copied.get('draftInfoSHA256'):(target/'draft_info.json').write_text(text,'utf-8')
     meta_file=target/'draft_meta_info.json';meta=json.loads(meta_file.read_text('utf-8'))
     meta.update(draft_id=draft['id'],draft_name=name,draft_fold_path=str(target),draft_root_path=str(root))
     meta_file.write_text(json.dumps(meta,ensure_ascii=False,indent=2),'utf-8')
     manifest=target/'manju_project.json';copied.update(name=name,draftSHA256=sha(content),
-        editorValidated=False,editorImportedAt=time.time(),importedFrom=str(source),editorMetaSHA256=sha(meta_file),
+        editorValidated=False,editorImportedAt=time.time(),importedFrom=str(source),editorMetaSHA256=sha(meta_file),editorDraftId=draft['id'],
         note='草稿已复制并重定位，尚未验证剪映实际打开；不是官方API导入回执。')
+    if copied.get('draftInfoSHA256'):copied['draftInfoSHA256']=sha(target/'draft_info.json')
+    if copied.get('metadataSHA256'):copied['metadataSHA256']=sha(meta_file)
     if operation_id:copied['flowOperationId']=operation_id
     manifest.write_text(json.dumps(copied,ensure_ascii=False,indent=2),'utf-8')
     check(target);marker.unlink()
@@ -379,16 +423,24 @@ def _open_index(folder):
     if not content.resolve().is_relative_to(folder) or not content.is_file() or not re.fullmatch(r'[a-f0-9]{64}',str(index.get('draftSHA256',''))):
         raise ValueError('工程草稿文件缺失或无效')
     changed=sha(content)!=index['draftSHA256']
+    for key,name in (('draftInfoSHA256','draft_info.json'),('virtualStoreSHA256','draft_virtual_store.json')):
+        if index.get(key):
+            path=folder/name
+            if not path.is_file():raise ValueError('剪映工程素材库或主文件缺失：'+name)
+            changed=changed or sha(path)!=index[key]
     meta=folder/'draft_meta_info.json'
-    if index.get('editorMetaSHA256'):
+    meta_digest=index.get('editorMetaSHA256') or index.get('metadataSHA256')
+    if meta_digest:
         if not meta.resolve().is_relative_to(folder) or not meta.is_file():raise ValueError('工程元信息缺失或越界')
-        changed=changed or sha(meta)!=index['editorMetaSHA256']
+        changed=changed or sha(meta)!=meta_digest
     imported_at=index.get('editorImportedAt')
     imported=(type(imported_at) in (int,float) and 0<imported_at<=time.time()+60 and
               isinstance(index.get('importedFrom'),str) and Path(index['importedFrom']).is_absolute())
     if changed and not imported:raise ValueError('原始生成工程内容已变化，请重新导出或核对；不会将其冒充已登记的编辑器副本')
     if not changed and index.get('timeline'):
-        jianying_timeline.validate_media_paths(folder,json.loads(content.read_text('utf-8')),index)
+        data=json.loads(content.read_text('utf-8'))
+        jianying_timeline.validate_media_paths(folder,data,index)
+        if index.get('library'):jianying_library.validate(folder,data,json.loads(meta.read_text('utf-8')),index)
     return index,changed
 
 def open_in_editor(folder,opts=None):
