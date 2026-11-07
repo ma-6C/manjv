@@ -5,7 +5,7 @@ import ai_providers as ai
 
 CHANNELS={'text':'文字','image':'封面生图','subtitle':'云端字幕'}
 PROTOCOLS={'text':ai.TEXT_PROTOCOLS,'image':ai.IMAGE_PROTOCOLS,
-           'subtitle':{'subtitle_json'}}
+           'subtitle':ai.SUBTITLE_PROTOCOLS}
 FIELDS={'id','name','channel','provider','protocol','base','model','enabled','tier','thinking','size','submitPath','pollPath'}
 TRACE_CALLBACKS={}
 

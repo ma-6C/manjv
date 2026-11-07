@@ -16,7 +16,7 @@ PATH_OPTIONS=('output','executable','draftRoot','aiPython','aiModelRoot','materi
 def automatic_options(preferences,config):
     """A product preset, independent of historical manual editing switches."""
     opts=jianying_projects.options({key:preferences.get(key,'auto' if key=='cudaLibraries' else '') for key in PATH_OPTIONS+('cudaLibraries',)})
-    opts.update(mouseOpen=True,registerIndex=True,timelineMode='detailed',splitScenes=True,
+    opts.update(mouseOpen=False,registerIndex=False,timelineMode='detailed',splitScenes=True,
                 shotSeconds=10,
                 editProfile='cinema',cameraMotion=True,colorAdjust=True,cutMaterials=True,
                 speedPattern='original',transition='dissolve',filterStyle='cinema',filterIntensity=25,

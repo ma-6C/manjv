@@ -1,6 +1,7 @@
 # Local state, owner tools and generated deliveries
 /data/
 /output/
+/modules/xiaovmiao/
 /release/
 /tmp/
 /vendor/

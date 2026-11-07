@@ -18,6 +18,7 @@ import secrets
 import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import traceback
@@ -32,6 +33,10 @@ import ai_providers as ai
 import api_connections as connections
 import media_download
 import promotions
+import promotion_studio
+import promotion_engines
+import promotion_mediakit
+import xiaovmiao
 import task_progress as telemetry
 import file_picker
 import hongguo_source
@@ -43,6 +48,7 @@ ROOT = Path(__file__).resolve().parent
 APP_HOME = Path(sys.executable).resolve().parent if getattr(sys,'frozen',False) else ROOT
 sys.path.insert(0, str(ROOT / 'vendor'))
 import track_sheets
+import cost_reports
 import vsr_pool
 import jianying_projects
 import jianying_timeline
@@ -51,8 +57,6 @@ import transform_tools
 import lama_local
 import publish_workflow
 import project_evidence
-import studio_flow
-import studio_flow_adapter
 DATA = runtime_paths.data_home()
 DATA.mkdir(parents=True, exist_ok=True)
 PUBLIC = ROOT / 'web'
@@ -65,9 +69,9 @@ NATIVE_BROWSE = None
 SOURCE_MANAGER = None
 PUBLISH_WORKSPACE = None
 EVIDENCE_MANAGER = None
-STUDIO_FLOW_MANAGER = None
-STUDIO_FLOW_ADAPTER = None
-LOCAL_JOB_KINDS = {'pipeline','transcode','subtitle','preview','transform_preview','playback','rewrite','cover','coverAI','records','cost','highlight','package','hook','promotion_package','track_sheet','jianying_project'}
+XIAOVMIAO = xiaovmiao.Manager(DATA, APP_HOME)
+LOCAL_JOB_KINDS = {'pipeline','transcode','subtitle','preview','transform_preview','playback','rewrite','cover','coverAI','records','cost','highlight','package','hook','track_sheet','jianying_project','promotion_analyse','promotion_render','promotion_auto'}
+RETIRED_PROMOTION_JOB_KINDS = {'promotion_package','promotion_dispatch'}
 SECRETS = {'apiKey': '', 'subtitleKey': ''}
 FFMPEG = os.environ.get('FFMPEG_EXE') or shutil.which('ffmpeg')
 if not FFMPEG:
@@ -94,7 +98,7 @@ DEFAULT = {
     'coverPrompt': '为这部漫剧创作竖版海报，保留参考图片中的人物特征，重新设计背景和构图，不保留原有文字，不添加标题文字。',
     'subtitleMode': 'local', 'subtitleRegion': {'x': 0.05, 'y': 0.78, 'w': 0.9, 'h': 0.14},
     'subtitleEndpoint': '', 'subtitlePoll': '', 'subtitleAuto': False, 'subtitleFirst': 4,
-    'subtitleRegions': [], 'pipelineHighlight': False,
+    'subtitleRegions': [], 'subtitlePreserveTailSeconds': 0, 'pipelineHighlight': False,
     'highlightCount': 1, 'highlightMin': 2, 'highlightMax': 6, 'highlightRandom': True,
     'highlightFixed': 4.2, 'highlightParallel': 2, 'highlightLowResource': False,
     'highlightMusic': '', 'highlightTailEnabled': False, 'highlightTailDirectory': '', 'highlightTailChoice': 'random',
@@ -107,6 +111,8 @@ DEFAULT = {
 }
 
 DEFAULT.update(copy.deepcopy(transform_tools.DEFAULTS))
+DEFAULT.update(copy.deepcopy(cost_reports.DEFAULTS))
+DEFAULT['promotionEngineSettings'] = promotion_engines.normalize()
 
 def read_json(path, fallback):
     try:
@@ -114,7 +120,33 @@ def read_json(path, fallback):
     except (OSError, ValueError):
         return copy.deepcopy(fallback)
 
-STATE = read_json(DATA / 'state.json', {'config': {}, 'projects': [], 'accounts': [], 'logs': []})
+def read_persistent_json(path, fallback, *, contents=None):
+    """An unreadable existing database must never become a new empty workspace."""
+    try:
+        value=json.loads(path.read_bytes() if contents is None else contents)
+        if not isinstance(value,type(fallback)):raise ValueError('数据根节点类型错误')
+        if isinstance(fallback,dict):
+            for key,default in fallback.items():
+                if key in value and not isinstance(value[key],type(default)):raise ValueError('数据字段类型错误：'+key)
+            for key in ('projects','accounts','logs','promotionTasks','promotionRevenue'):
+                if key in value and (not isinstance(value[key],list) or any(not isinstance(row,dict) for row in value[key])):
+                    raise ValueError('数据列表格式错误：'+key)
+        else:
+            for row in value:
+                if (not isinstance(row,dict) or ('config' in row and not isinstance(row['config'],dict))
+                    or any(not isinstance(row.get(key),str) or not row[key] for key in ('id','kind','status'))
+                    or ('ids' in row and not isinstance(row['ids'],list))):
+                    raise ValueError('任务记录格式错误')
+        return value
+    except FileNotFoundError:
+        return copy.deepcopy(fallback)
+    except (OSError,ValueError) as error:
+        backup=path.with_suffix(path.suffix+'.bak')
+        hint='可核对上一份有效备份：'+str(backup) if backup.is_file() else '请从已有备份恢复，或联系维护人员处理。'
+        raise RuntimeError('无法读取软件数据，原文件已保留，未创建空白数据：'+str(path)+'。'+hint) from error
+
+
+STATE = read_persistent_json(DATA / 'state.json', {'config': {}, 'projects': [], 'accounts': [], 'logs': []})
 saved_vsr_mode=STATE.get('config',{}).get('vsrMode')
 if 'highlightFixed' not in STATE.get('config',{}):STATE.setdefault('config',{})['highlightFixed']=STATE.get('config',{}).get('highlightMin',DEFAULT['highlightFixed'])
 STATE['config'] = DEFAULT | STATE.get('config', {})
@@ -133,14 +165,21 @@ if not STATE['config']['vsrRoot'] and not getattr(sys,'frozen',False):
             break
 for key in ['projects', 'accounts', 'logs','promotionTasks','promotionRevenue']:
     STATE.setdefault(key, [])
+for row in STATE['promotionTasks']:
+    if row.get('platform') and row.get('status') in ('queued','running'):
+        row.update(status='needs_attention',message='上次发布已中断，请到平台核对，勿直接重复发布。')
 try:STATE['trackSheetOptions']=track_sheets.options(STATE.get('trackSheetOptions',{}))
 except ValueError:STATE['trackSheetOptions']=track_sheets.options({})
 
 # 保存的任务只含非密钥配置；进程、取消信号等运行对象不会写入磁盘。
-for item in read_json(DATA / 'jobs.json', []):
-    if not isinstance(item,dict) or not item.get('id') or not isinstance(item.get('config'),dict):continue
+for item in read_persistent_json(DATA / 'jobs.json', []):
+    item.setdefault('config',{});item.setdefault('ids',[])
     if 'highlightFixed' not in item['config']:item['config']['highlightFixed']=item['config'].get('highlightMin',DEFAULT['highlightFixed'])
     item['config'] = connections.retire_video_config(DEFAULT | {k:v for k,v in item['config'].items() if k in DEFAULT})
+    if item.get('kind') in RETIRED_PROMOTION_JOB_KINDS:
+        item['moduleRetired']=True
+        if item.get('status') not in ('completed','failed','cancelled'):
+            item.update(status='cancelled',stage='发布挂载与跳转核对已移除，历史文件与记录保留；如有平台操作请到平台核对。',finished=time.time())
     if item.get('kind')=='video_generate':
         item['moduleRetired']=True
         if item.get('status') not in ('completed','failed','cancelled'):
@@ -164,22 +203,38 @@ def replace_state_file(temporary,target):
             time.sleep(.01*(2**attempt))
 
 
+def write_persistent_json(path, value, fallback):
+    # Preserve a last known valid version before replacing either database.
+    # A file modified/corrupted while the app is open must also be left intact.
+    contents=json.dumps(value,ensure_ascii=False,indent=2)
+    read_persistent_json(path,fallback,contents=contents)
+    try:previous=path.read_bytes()
+    except FileNotFoundError:previous=None
+    if previous is not None:
+        # Validate the very bytes we back up, rather than reopening between
+        # validation and copying (an external editor may change the file).
+        read_persistent_json(path,fallback,contents=previous)
+        backup=path.with_suffix(path.suffix+'.bak')
+        backup_tmp=path.with_suffix(path.suffix+'.bak.tmp')
+        backup_tmp.write_bytes(previous)
+        replace_state_file(backup_tmp,backup)
+    temporary=path.with_suffix('.tmp')
+    temporary.write_text(contents,'utf-8')
+    replace_state_file(temporary,path)
+
+
 def persist_jobs():
     with LOCK:
         rows=[{k:v for k,v in j.items() if k not in ['cancel','processes']} for j in JOBS.values()]
-        path=DATA/'jobs.tmp'
-        path.write_text(json.dumps(rows,ensure_ascii=False,indent=2),'utf-8')
-        replace_state_file(path,DATA/'jobs.json')
+        write_persistent_json(DATA/'jobs.json',rows,[])
 
 def save():
     with LOCK:
-        tmp = DATA / 'state.tmp'
-        tmp.write_text(json.dumps(STATE, ensure_ascii=False, indent=2), 'utf-8')
-        replace_state_file(tmp,DATA / 'state.json')
+        write_persistent_json(DATA/'state.json',STATE,{'config':{},'projects':[],'accounts':[],'logs':[]})
         persist_jobs()
 
 def diagnostic_text(message):
-    text=ai.redact(message)
+    text=promotion_mediakit.redact(ai.redact(message))
     for secret in SECRETS.values():
         if secret:text=text.replace(secret,'[已隐藏]')
     return telemetry.safe_text(text)
@@ -221,7 +276,13 @@ def number(value, low, high, name):
         raise ValueError(f'{name}须在 {low} 至 {high} 之间')
     return n
 
+PERSISTENT_SUBTITLE_MODES=('sttn-auto',*lama_local.MODES)
+VSR_MODES=(*PERSISTENT_SUBTITLE_MODES,'sttn','sttn-det','lama','propainter')
+
+
 def validate_config(c):
+    c.setdefault('subtitlePreserveTailSeconds', 0)
+    c['promotionEngineSettings']=promotion_engines.normalize(c.get('promotionEngineSettings'))
     ai.validate(c)
     connections.validate(c)
     if not isinstance(c['aiProfiles'],dict):raise ValueError('AI平台配置记录无效')
@@ -241,7 +302,7 @@ def validate_config(c):
     for key,value in DEFAULT.items():
         if isinstance(value,bool) and not isinstance(c[key],bool):raise ValueError(f'{key}必须为布尔值')
     if c['subtitleMode'] not in ['local','cloud','vsr']:raise ValueError('字幕模式无效')
-    if c['vsrMode'] not in ['sttn-auto','lama-box','sttn','sttn-det','lama','propainter']:raise ValueError('本地修复引擎无效')
+    if c['vsrMode'] not in VSR_MODES:raise ValueError('本地修复引擎无效')
     if c['lamaDevice'] not in ['auto','cpu']:raise ValueError('LaMa 推理设备无效')
     if c['sttnDevice'] not in ['auto','cpu']:raise ValueError('STTN 推理设备无效')
     if c['uploadMode'] not in ['draft','now','scheduled']:raise ValueError('上传模式无效')
@@ -249,8 +310,10 @@ def validate_config(c):
                         ('parallel', 1, 8), ('brightness', -.2, .2), ('contrast', .8, 1.3),
                         ('saturation', 0, 2), ('speed', .5, 2), ('cropPercent', 0, 15),
                         ('highlightCount', 1, 10), ('highlightMin', 0, 10), ('highlightMax', 0, 10), ('highlightFixed',0,10), ('highlightParallel',1,8),
-                        ('subtitleFirst', 1, 100)]:
+                        ('subtitleFirst', 1, 100), ('subtitlePreserveTailSeconds', 0, 30)]:
         c[key]=number(c[key], lo, hi, key)
+    if c['subtitlePreserveTailSeconds'] and (c['subtitleMode']!='vsr' or c['vsrMode'] not in PERSISTENT_SUBTITLE_MODES):
+        raise ValueError('片尾保留支持 STTN 时序修复及 LaMa 框选和白字轮廓模式，请切换引擎或将保留秒数设为 0')
     for key in ['width', 'height', 'parallel', 'highlightCount', 'highlightParallel', 'subtitleFirst']:
         if float(c[key]) != int(c[key]):
             raise ValueError(f'{key}必须为整数')
@@ -269,8 +332,7 @@ def validate_config(c):
         for key in ['x', 'y', 'w', 'h']:number(r.get(key), 0, 1, '字幕区域')
         if r['w'] <= 0 or r['h'] <= 0 or r['x'] + r['w'] > 1.000001 or r['y'] + r['h'] > 1.000001:
             raise ValueError('字幕区域超出画面')
-    for row in c['costRows']:
-        number(row['amount'], 0, 1e12, '成本金额')
+    cost_reports.validate(c)
     if any(c.get(k) and not c[k].startswith('https://') for k in ['apiBase', 'subtitleEndpoint', 'subtitlePoll']):
         raise ValueError('外部服务地址必须使用 HTTPS，证书校验始终启用')
     out = Path(c['output']).expanduser().resolve()
@@ -411,6 +473,22 @@ def get_project(pid):
         raise ValueError('素材项目不存在，请重新扫描')
     return p
 
+
+def store_promotion_settings(project, clean):
+    with LOCK:
+        keys = ('promotionStudio', 'promotionStudioByEngine')
+        previous = {key: copy.deepcopy(project[key]) for key in keys if key in project}
+        try:
+            by_engine = promotion_studio.remember_settings(project, clean)
+            save()
+        except Exception:
+            for key in keys:
+                project.pop(key, None)
+            project.update(previous)
+            raise
+        return by_engine
+
+
 def scan(source):
     root = Path(source).expanduser().resolve()
     if not root.is_dir():
@@ -460,7 +538,7 @@ def scan(source):
             raise ValueError('该素材有正在处理或排队的任务，请先暂停或停止任务再重新扫描')
         for p in found:
             old = next((x for x in STATE['projects'] if x['id']==p['id']), {})
-            for key in ['finalVideoPaths','finalJob','sourcePreviewPaths','promotionEntry','promotionEntries','promotionClips','sourceMetadata']:
+            for key in ['finalVideoPaths','finalJob','sourcePreviewPaths','promotionEntry','promotionEntries','promotionClips','promotionStudio','promotionStudioByEngine','promotionAnalysis','sourceMetadata']:
                 if key in old:p[key]=old[key]
         STATE['projects'] = [p for p in STATE['projects'] if p['id'] not in ids] + found
         STATE['config']['source'] = str(root)
@@ -632,7 +710,6 @@ def set_final(p, files, job):
         save()
 
 def stage(job, label, progress):
-    licensing.require(DATA)
     with LOCK:
         if JOBS[job]['cancel'].is_set():
             raise InterruptedError('任务已停止')
@@ -982,7 +1059,8 @@ def cloud_subtitle(p,cfg,job):
             payload={'filename':v['name'],'video_base64':base64.b64encode(Path(v['path']).read_bytes()).decode(),'region':subtitle_regions(cfg)[0]}
             def submit(selected):
                 c=selected['_aiConnection'];record({'connection':c,'status':'submitting'})
-                try:result=ai.request_json(c['base']+c['submitPath'],payload,connections.require_key(cfg,c),timeout=300)
+                request_payload=payload|({'model':c['model']} if c.get('model') else {})
+                try:result=ai.request_json(c['base']+c['submitPath'],request_payload,connections.require_key(cfg,c),timeout=300)
                 except ai.ProviderError as error:
                     uncertain=error.code in ['NetworkError','InvalidResponse'] or (error.status is not None and error.status>=500)
                     record({'connection':c,'status':'submission_unknown' if uncertain else 'rejected'})
@@ -1034,10 +1112,12 @@ def vsr_subtitle(p,cfg,job):
     if not (root/'backend'/'main.py').is_file():
         raise ValueError('请先配置 video-subtitle-remover 源码目录，需包含 backend/main.py、模型权重和依赖环境')
     if not runtime.is_file():raise ValueError('字幕引擎Python不存在，请选择已安装该引擎依赖的Python解释器')
-    if cfg['vsrMode'] not in ['sttn-auto','lama-box','sttn','sttn-det','lama','propainter']:
+    mode=cfg['vsrMode']
+    if mode not in VSR_MODES:
         raise ValueError('不支持的字幕修补模型')
-    if cfg['vsrMode']=='lama-box' and not lama_local.ready(root,runtime):raise ValueError('LaMa 模型未安装：需要 backend/models/big-lama/big-lama.pt')
-    (vsr_pool.POOL if cfg['vsrMode']=='lama-box' else lama_local.POOL).close()
+    uses_lama=mode in lama_local.MODES
+    if uses_lama and not lama_local.ready(root,runtime):raise ValueError('LaMa 模型未安装：需要 backend/models/big-lama/big-lama.pt')
+    (vsr_pool.POOL if uses_lama else lama_local.POOL).close()
     out=project_dir(p,cfg)/'本地AI去字幕'/job;out.mkdir(parents=True,exist_ok=True)
     videos=p['videos'][:cfg['subtitleFirst']]
     telemetry.batch(JOBS[job],p['id']+':subtitle','本阶段已修复的源视频',len(videos),sum(cached(job,f'{p["id"]}:subtitle:{i}') is not None for i in range(len(videos))))
@@ -1056,26 +1136,52 @@ def vsr_subtitle(p,cfg,job):
         stage(job,f'本地AI去字幕：{i+1}/{len(videos)}，模型 {cfg["vsrMode"]}',10+i/len(videos)*80)
         tid=telemetry.begin(JOBS[job],'加载模型／准备字幕修复',v['name'],unit='frames')
         engine_log=''
-        if cfg['vsrMode'] in ('lama-box','sttn-auto'):
+        if mode in PERSISTENT_SUBTITLE_MODES:
             coords=[[int(r['y']*h),int((r['y']+r['h'])*h),int(r['x']*w),int((r['x']+r['w'])*w)] for r in subtitle_regions(cfg)]
             def attach(proc):
                 with LOCK:JOBS[job]['processes'].add(proc)
             def detach(proc):
                 with LOCK:JOBS[job]['processes'].discard(proc)
-            pool=lama_local.POOL if cfg['vsrMode']=='lama-box' else vsr_pool.POOL
+            pool=lama_local.POOL if uses_lama else vsr_pool.POOL
             def cpu_fallback(reason):
                 log('STTN 显卡与当前引擎不兼容，已自动改用 CPU，重新处理当前视频（耗时会增加）：'+reason,level='warning',job=job)
                 stage(job,'STTN 改用 CPU 重新修复：'+v['name'],10+i/len(videos)*80)
                 telemetry.restart(JOBS[job],tid,'改用 CPU，重新加载字幕修复模型')
-            device_key='lamaDevice' if cfg['vsrMode']=='lama-box' else 'sttnDevice'
-            stats=pool.run(runtime,root,{'input':v['path'],'output':str(target),'mode':cfg['vsrMode'],'regions':coords,'duration':v['duration'],'device':cfg.get(device_key,'auto'),'ffmpeg':FFMPEG},JOBS[job]['cancel'],
-                observe=lambda line:telemetry.vsr_event(JOBS[job],tid,line),heartbeat=lambda:telemetry.heartbeat(JOBS[job],tid),attach=attach,detach=detach,on_fallback=cpu_fallback)
+            device_key='lamaDevice' if uses_lama else 'sttnDevice'
+            request={'input':v['path'],'output':str(target),'mode':mode,'regions':coords,'duration':v['duration'],
+                     'preserveTailSeconds':cfg.get('subtitlePreserveTailSeconds',0),'device':cfg.get(device_key,'auto'),'ffmpeg':FFMPEG}
+            cancel=JOBS[job]['cancel']
+            if uses_lama and cfg['gpu']:
+                hardware=gpu_encoding.probe(FFMPEG,w,h,runner=lambda args:run_process(args,job,timeout=8))
+                if hardware['available']:
+                    encoder_args=gpu_encoding.quality_args(hardware['encoderArgs'],cfg.get('encodeQuality','balanced'))
+                    request['encodeArgs']=gpu_encoding.prepare_arguments(encoder_args+['-pix_fmt','yuv420p'])
+                else:
+                    log('LaMa 显卡编码检测未通过，使用 CPU 编码。'+hardware['detail'],level='warning',job=job)
+            def run_worker():
+                return pool.run(runtime,root,request,cancel,observe=lambda line:telemetry.vsr_event(JOBS[job],tid,line),
+                    heartbeat=lambda:telemetry.heartbeat(JOBS[job],tid),attach=attach,detach=detach,on_fallback=cpu_fallback)
+            try:
+                stats=run_worker()
+            except vsr_pool.WorkerError as error:
+                if (not request.get('encodeArgs') or cancel.is_set() or 'LaMa video encoding failed' not in str(error)
+                        or not gpu_encoding.startup_failure(error)):
+                    raise
+                request.pop('encodeArgs')
+                log('LaMa 显卡编码启动失败，改用 CPU 编码重试当前视频。'+gpu_encoding.failure(error)['detail'],level='warning',job=job)
+                telemetry.restart(JOBS[job],tid,'改用 CPU 编码，重新处理当前视频')
+                stats=run_worker()
             if not cfg.get('vsrReuseWorker',True):pool.close()
             JOBS[job]['vsrWorker']=stats
             engine_log=stats.pop('engineLog','')
             JOBS[job]['localRepairEngine']=cfg['vsrMode']
-            if stats.get('fallback') and cfg['vsrMode']=='lama-box':log('LaMa 推理已自动改用 CPU：'+stats['fallback'],level='warning',job=job)
+            if stats.get('fallback') and uses_lama:log('LaMa 推理已自动改用 CPU：'+stats['fallback'],level='warning',job=job)
+            if mode=='lama-text':
+                inferred=stats['inferredFrames']
+                log(f'{v["name"]} 匹配白字轮廓并修复 {inferred} 帧，未匹配的画面保留',level='info' if inferred else 'warning',job=job)
             log(('STTN' if cfg['vsrMode']=='sttn-auto' else 'LaMa')+' 实际推理设备：'+str(stats.get('device','未记录')),job=job)
+            if stats.get('videoEncoder'):
+                log('LaMa 实际视频编码：'+gpu_encoding.ENCODER_LABELS.get(stats['videoEncoder'],stats['videoEncoder']),job=job)
             log(('复用常驻模型' if stats['reusedProcess'] else '启动常驻模型')+f'，累计处理 {stats["completedVideos"]} 集，模型加载 {stats["modelLoads"]} 次',job=job)
         else:
             vsr_pool.POOL.close()
@@ -1115,10 +1221,19 @@ def preview_subtitle(p,cfg,job):
             '-pix_fmt','yuv420p','-threads','2','-movflags','+faststart',str(source)],job)
         register(p,source,'试处理原片',job);checkpoint(job,key,[source])
     sample={**p,'videos':video_entries([source])}
-    result=repair_subtitles(sample,cfg,job,True)[0]
+    preview_config=cfg
+    if cfg.get('subtitlePreserveTailSeconds',0):
+        seconds=sample['videos'][0]['duration']
+        preserve=max(0,min(seconds,options['start']+seconds-max(0,v['duration']-cfg['subtitlePreserveTailSeconds'])))
+        preview_config=cfg|{'subtitlePreserveTailSeconds':preserve}
+    result=repair_subtitles(sample,preview_config,job,True)[0]
     JOBS[job]['result']={'before':str(source),'after':str(result),'videoIndex':options['videoIndex'],
                         'start':options['start'],'seconds':probe(source)['duration'],
-                        'mode':cfg['subtitleMode'],'engine':cfg['vsrMode'] if cfg['subtitleMode']=='vsr' else cfg['subtitleMode'],'regions':subtitle_regions(cfg)}
+                        'mode':cfg['subtitleMode'],'engine':cfg['vsrMode'] if cfg['subtitleMode']=='vsr' else cfg['subtitleMode'],'regions':subtitle_regions(cfg),
+                        'preserveTailSeconds':preview_config.get('subtitlePreserveTailSeconds',0),
+                        'configuredPreserveTailSeconds':cfg.get('subtitlePreserveTailSeconds',0)}
+    if cfg['subtitleMode']=='vsr' and cfg['vsrMode']=='lama-text':
+        JOBS[job]['result']['inferredFrames']=JOBS[job].get('vsrWorker',{}).get('inferredFrames')
     persist_jobs()
 
 def sha256(path):
@@ -1152,55 +1267,14 @@ def records(p,cfg,job):
     register(p,manifest,'制作记录',job)
 
 def costs(p,cfg,job):
-    from docx import Document
-    from docx.shared import Inches,Pt,RGBColor
-    from docx.oxml.ns import qn
-    rows=cfg['costRows'];total=sum(float(r['amount']) for r in rows)
-    if total<=0:
-        raise ValueError('成本合计为0，请填写实际成本后生成')
-    out=project_dir(p,cfg)
-    csvpath=out/'成本比例表.csv'
-    with csvpath.open('w',encoding='utf-8-sig',newline='') as f:
-        writer=csv.writer(f);writer.writerow(['项目','金额（元）','占比'])
-        for r in rows:
-            writer.writerow([r['name'],f'{float(r["amount"]):.2f}',f'{float(r["amount"])/total:.2%}'])
-        writer.writerow(['合计',f'{total:.2f}','100.00%'])
-    register(p,csvpath,'成本报告',job)
-    template=cfg.get('costTemplate','').strip()
-    if template and (not Path(template).is_file() or Path(template).suffix.lower()!='.docx'):
-        raise ValueError('Word模板不存在或不是.docx文件')
-    doc=Document(template) if template else Document()
-    style=doc.styles['Normal'];style.font.name='Microsoft YaHei';style.font.size=Pt(11)
-    style.element.rPr.rFonts.set(qn('w:eastAsia'),'微软雅黑')
-    if template:
-        values={'{{剧名}}':p['name'],'{{总成本}}':f'{total:.2f}','{{日期}}':time.strftime('%Y-%m-%d')}
-        paragraphs=list(doc.paragraphs)
-        for table in doc.tables:
-            for row in table.rows:
-                for cell in row.cells:
-                    paragraphs+=list(cell.paragraphs)
-        for para in paragraphs:
-            if any(k in para.text for k in values):
-                text=para.text
-                for key,value in values.items():text=text.replace(key,value)
-                if para.runs:
-                    para.runs[0].text=text
-                    for run in para.runs[1:]:run.text=''
-                else:para.add_run(text)
-        doc.add_page_break()
-    title=doc.add_paragraph(p['name']+' 制作成本报告','Title')
-    for run in title.runs:run.font.color.rgb=RGBColor(0,0,0)
-    doc.add_paragraph(f'本报告记录本剧填报的制作成本及各项占比。成本合计为 {total:,.2f} 元，金额由填报人核实后用于内部自查或报备。')
-    table=doc.add_table(rows=1,cols=3);table.style='Light Shading Accent 1'
-    for cell,text in zip(table.rows[0].cells,['成本项目','金额（元）','占比']):cell.text=text
-    for r in rows:
-        cells=table.add_row().cells
-        for cell,text in zip(cells,[r['name'],f'{float(r["amount"]):,.2f}',f'{float(r["amount"])/total:.2%}']):cell.text=text
-    cells=table.add_row().cells
-    for cell,text in zip(cells,['合计',f'{total:,.2f}','100.00%']):cell.text=text
-    doc.add_paragraph('填报日期 '+time.strftime('%Y-%m-%d'))
-    doc.add_paragraph('填报人 ____________________    复核人 ____________________')
-    path=out/'成本报告.docx';doc.save(path);register(p,path,'成本报告',job)
+    final=final_videos(p)
+    videos=video_entries([v['path'] for v in final]) if final else p['videos']
+    info=cost_reports.generate(p,cfg,videos,'final' if final else 'original',project_dir(p,cfg))
+    for path in info['files']:register(p,path,'成本报告',job)
+    scope='当前成片' if final else '导入源片'
+    log(f'成本报告已生成：{p["name"]} · {scope} {info["count"]}集，共{info["duration"]}；总投资 {info["total"]:.2f} 元，演员片酬 {info["actorAmount"]:.2f} 元，占比 {info["actorRatio"]:.2%}。'+
+        ('未填写的机构、代表人留空待签署。' if not cfg.get('costOrganization') or not cfg.get('costRepresentative') else ''),job=job)
+
 
 def highlight(p,cfg,job):
     return highlight_render.render(sys.modules[__name__],p,cfg,job)
@@ -1232,22 +1306,6 @@ def promotion_hook(p,cfg,jid):
             stat=target.stat();clips.append({'id':jid,'path':str(target),'title':options['title'],'sourcePath':v['path'],'start':options['start'],
                 'sourceKind':options.get('hookSourceKind','original'),'seconds':meta['duration'],'cta':options['cta'],'bytes':stat.st_size,'mtimeNs':stat.st_mtime_ns,'sha256':sha256(target),'createdAt':time.time()})
         JOBS[jid]['result']={'clipId':jid,'path':str(target),'seconds':meta['duration']};save()
-
-def promotion_package(p,cfg,jid):
-    if not p['rights']:raise ValueError('请先确认素材制作与推广授权')
-    snapshot=JOBS[jid]['options']['promotionTask'];clip=snapshot['clip'];path=Path(clip['path'])
-    if not path.is_file() or path.stat().st_size!=clip['bytes'] or sha256(path)!=clip['sha256']:raise ValueError('推广素材已修改，请重新制作并建立任务')
-    out=project_dir(p,cfg)/'推广挂载'/snapshot['id'];out.mkdir(parents=True,exist_ok=True);target=out/f'推广任务_{jid}.zip'
-    manifest={'format':1,'taskId':snapshot['id'],'project':snapshot['projectName'],'account':snapshot['accountName'],
-        'entry':snapshot['entry'],'clip':{k:clip[k] for k in ['title','start','seconds','sha256']},
-        'videoFile':'钩子短视频.mp4','mountStatus':'pending','platformResult':None,'preparedAt':time.time()}
-    with zipfile.ZipFile(target,'w',zipfile.ZIP_DEFLATED,compresslevel=1) as z:
-        z.write(path,'钩子短视频.mp4');z.writestr('挂载任务.json',json.dumps(manifest,ensure_ascii=False,indent=2))
-        z.writestr('发布核对说明.txt','1. 在指定账号的发布后台上传本包视频。\n2. 选择本任务指定的剧集或小程序入口，核对剧名与平台ID。\n3. 在官方页面确认后由本人发布。\n4. 查看实际作品，核对全集入口可点击且指向正确剧集。\n5. 回到软件填写作品ID或链接及核对说明。\n本包只准备素材与挂载信息，没有执行平台发布、广告播放或收益结算。')
-    register(p,target,'推广发布包',jid)
-    with LOCK:
-        row=promotions.task(STATE,snapshot['id']);row['packagePath']=str(target);row['updatedAt']=time.time();save()
-    JOBS[jid]['result']={'taskId':snapshot['id'],'path':str(target)}
 
 def package(p,cfg,job):
     if not p['rights']:
@@ -1378,8 +1436,9 @@ def worker(jid,ids,kind,cfg):
     cfg=copy.deepcopy(cfg);cfg['_aiTraceId']=jid;connections.TRACE_CALLBACKS[jid]=lambda event:trace_connection(jid,event)
     run_start=time.time()
     try:
-        licensing.require(DATA)
-        job.update(status='running',runStarted=run_start)
+        with LOCK:
+            if QUEUE_STOP.is_set():raise InterruptedError('应用正在关闭')
+            job.update(status='running',runStarted=run_start)
         job.pop('diagnostic',None);job.pop('error',None)
         job.pop('encoderSelection',None);job.pop('gpuFallback',None)
         for key in ('fallbackCode','fallbackReason','probeProfile'):job.get('encoding',{}).pop(key,None)
@@ -1387,7 +1446,7 @@ def worker(jid,ids,kind,cfg):
         job['telemetry']={'rows':[]};telemetry.phase(job,'正在核对任务与检查点')
         job.setdefault('started',run_start);persist_jobs()
         if job['cancel'].is_set():raise InterruptedError('任务已停止')
-        if job.get('sourceSnapshot')!=source_snapshot(ids,job.get('options',{}).get('sourceVideoPaths')):raise ValueError('源素材已修改或移动，请核对后创建新任务；本任务检查点保留')
+        if kind!='rewrite' and job.get('sourceSnapshot')!=source_snapshot(ids,job.get('options',{}).get('sourceVideoPaths')):raise ValueError('源素材已修改或移动，请核对后创建新任务；本任务检查点保留')
         if kind=='login':
             engine_login(cfg,jid)
         if kind=='track_sheet':track_sheet_batch(ids,cfg,jid)
@@ -1448,7 +1507,8 @@ def worker(jid,ids,kind,cfg):
                 completed('transform_preview')
             if kind=='playback':playback_proxy(p,cfg,jid)
             if kind=='hook':promotion_hook(p,cfg,jid)
-            if kind=='promotion_package':promotion_package(p,cfg,jid)
+            if kind in ('promotion_analyse','promotion_render','promotion_auto'):
+                promotion_studio.run(sys.modules[__name__],p,cfg,jid)
             if kind=='highlight' or (kind=='pipeline' and cfg['pipelineHighlight'] and not fused):
                 inputs=[] if kind=='highlight' and job.get('options',{}).get('highlightOriginalSelection') else final_videos(p)
                 options=cfg
@@ -1471,10 +1531,19 @@ def worker(jid,ids,kind,cfg):
             stage(jid,f'{p["name"]}：完成 ({index+1}/{len(ids)})',100)
             checkpoint(jid,f'{pid}:project-done',[a['path'] for a in p['artifacts'] if a['job']==jid and Path(a['path']).is_file()])
             save()
-        job.update(status='completed',progress=100,stage='全部完成')
+        with LOCK:
+            if QUEUE_STOP.is_set() or job['cancel'].is_set():raise InterruptedError('任务已停止')
+            job.update(status='completed',progress=100,stage='全部完成')
+        if kind in ('promotion_auto','promotion_render'):
+            job['stage']='混剪已完成，可预览或保存推广视频'
+            result=job.get('result') or {}
+            requested=result.get('requestedClipCount')
+            if requested and len(result['clipIds'])<requested:
+                job['stage']=f'已导出 {len(result["clipIds"])} / {requested} 条合格成片，可预览或保存'
         log('任务完成',job=jid)
     except InterruptedError:
-        job.update(status='paused' if job.get('pauseRequested') else 'cancelled',stage='已暂停，可从检查点继续' if job.get('pauseRequested') else '已停止；已完成文件保留')
+        if QUEUE_STOP.is_set():job.update(status='interrupted',stage='应用已关闭，重新打开后可继续')
+        else:job.update(status='paused' if job.get('pauseRequested') else 'cancelled',stage='已暂停，可从检查点继续' if job.get('pauseRequested') else '已停止；已完成文件保留')
         log('任务已停止',level='warning',job=jid)
     except Exception as e:
         diagnostic=telemetry.failure(job,e,redact=diagnostic_text,trace=traceback.format_exc())
@@ -1515,8 +1584,18 @@ def source_snapshot(ids,selections=None):
             if any(p not in entries for p in selections[pid]):raise ValueError('所选源视频已移除，请核对后重新创建任务')
             return [entries[p] for p in selections[pid]]
         return list(entries.values())
-    return {pid:[{'path':v['path'],'bytes':Path(v['path']).stat().st_size,'mtime':Path(v['path']).stat().st_mtime_ns}
-                 for v in videos(pid)] for pid in ids}
+    result={}
+    for pid in ids:
+        result[pid]=[]
+        for video in videos(pid):
+            path=Path(video['path'])
+            try:
+                if not path.is_file():raise FileNotFoundError(str(path))
+                stat=path.stat()
+            except OSError as error:
+                raise ValueError('源视频无法读取：'+str(path)+'。请在「文案与封面」或素材详情中点击「重新定位素材」，选择视频现在所在的文件夹。') from error
+            result[pid].append({'path':str(path),'bytes':stat.st_size,'mtime':stat.st_mtime_ns})
+    return result
 
 def ensure_runner():
     global QUEUE_THREAD
@@ -1529,24 +1608,56 @@ def ensure_runner():
 def queue_runner():
     while not QUEUE_STOP.is_set():
         with LOCK:
+            if QUEUE_STOP.is_set():break
             pending=sorted((j for j in JOBS.values() if j['status']=='queued'),key=lambda j:j.get('queueAt',j['created']))
             job=pending[0] if pending else None
-            if job:job['status']='running';persist_jobs()
-        if job:worker(job['id'],job['ids'],job['kind'],job['config'])
+            if job:
+                job['status']='running'
+                try:persist_jobs()
+                except Exception as error:
+                    # No processing or paid call may start until the running
+                    # transition is durable. Keep an actionable failure in UI.
+                    job.update(status='failed',stage='无法保存任务状态，尚未开始处理',error=diagnostic_text(error),
+                        diagnostic=telemetry.failure(job,error,redact=diagnostic_text),finished=time.time())
+                    return
+        if job:
+            try:worker(job['id'],job['ids'],job['kind'],job['config'])
+            except Exception as error:
+                # worker's final persistence can itself fail (disk full/locked).
+                # Do not leave the queue displaying an indefinitely running job.
+                job.update(status='failed',stage='无法保存任务结果，请检查磁盘和权限后重试',error=diagnostic_text(error),
+                    diagnostic=telemetry.failure(job,error,redact=diagnostic_text),finished=time.time())
+                return
         else:QUEUE_WAKE.wait(1);QUEUE_WAKE.clear()
 
 def control_job(jid,action):
     with LOCK:
+        if QUEUE_STOP.is_set():raise ValueError('服务正在关闭，请重新打开应用后继续')
         job=JOBS.get(jid)
         if not job:raise ValueError('任务不存在')
         if action=='resume':
+            if job['kind'] in RETIRED_PROMOTION_JOB_KINDS:raise ValueError('发布挂载与跳转核对已移除，历史发布任务不能恢复')
             if job['kind']=='track_sheet':raise ValueError('自绘工程图功能已移除，历史文件保留；请到剪映工程与截图建立真实工程')
             if job['kind']=='video_generate':raise ValueError('视频生成功能已移除，历史任务不能恢复；已有视频仍可使用')
             if job['kind'] not in LOCAL_JOB_KINDS:raise ValueError('登录或上传任务不能自动恢复，请在发布页重新核对并发起')
             if job['status'] not in ['paused','interrupted','failed','cancelled']:raise ValueError('该任务不能恢复')
-            if job.get('sourceSnapshot')!=source_snapshot(job['ids'],job.get('options',{}).get('sourceVideoPaths')):raise ValueError('源素材已改变，请创建新任务；未复用旧检查点')
+            if job['kind'].startswith('promotion_') and any(
+                    other is not job and other['kind'].startswith('promotion_')
+                    and other['status'] in ('queued','running','pausing','paused')
+                    and set(job['ids']).intersection(other['ids']) for other in JOBS.values()):
+                raise ValueError('本剧已有其他推广任务，请先等待或停止当前任务再恢复')
+            if job['kind']!='rewrite' and job.get('sourceSnapshot')!=source_snapshot(job['ids'],job.get('options',{}).get('sourceVideoPaths')):raise ValueError('源素材已改变，请创建新任务；未复用旧检查点')
+            fields=('status','stage','pauseRequested','queueAt','attempts','error','finished')
+            previous={key:job[key] for key in fields if key in job};was_cancelled=job['cancel'].is_set()
             job['cancel'].clear();job.update(status='queued',stage='已加入恢复队列',pauseRequested=False,queueAt=time.time(),attempts=job.get('attempts',1)+1)
-            job.pop('error',None);job.pop('finished',None);persist_jobs();ensure_runner()
+            job.pop('error',None);job.pop('finished',None)
+            try:persist_jobs()
+            except Exception:
+                for key in fields:job.pop(key,None)
+                job.update(previous)
+                if was_cancelled:job['cancel'].set()
+                raise
+            ensure_runner()
         elif action in ['pause','cancel']:
             if job['status'] in ['completed']:raise ValueError('任务已完成')
             if action=='pause' and job['kind'] not in LOCAL_JOB_KINDS:raise ValueError('登录或上传任务请停止后重新核对')
@@ -1563,8 +1674,6 @@ def control_job(jid,action):
     return {'id':jid,'status':job['status']}
 
 def shutdown_jobs():
-    if STUDIO_FLOW_MANAGER is not None:STUDIO_FLOW_MANAGER.shutdown()
-    if STUDIO_FLOW_ADAPTER is not None:STUDIO_FLOW_ADAPTER.shutdown()
     QUEUE_STOP.set();QUEUE_WAKE.set()
     with LOCK:
         for job in JOBS.values():
@@ -1606,7 +1715,7 @@ def job_preflight(body, *, config=None):
         if not Path(v['path']).is_file():errors.append('源视频已移动或删除：'+v['name'])
     if uses_subtitle and cfg['subtitleMode']=='vsr':
         if not (Path(cfg['vsrRoot'])/'backend/main.py').is_file() or not Path(cfg['vsrPython']).is_file():errors.append('本地AI去字幕引擎未配置或不完整，请到AI去字幕页核对')
-        if cfg['vsrMode']=='lama-box' and not lama_local.ready(cfg['vsrRoot'],cfg['vsrPython']):errors.append('LaMa 本地模型未安装：需要 big-lama/big-lama.pt，可先切回 STTN')
+        if cfg['vsrMode'] in lama_local.MODES and not lama_local.ready(cfg['vsrRoot'],cfg['vsrPython']):errors.append('LaMa 本地模型未安装：需要 big-lama/big-lama.pt，可先切回 STTN')
     interfaces=[];channels=[]
     if uses_subtitle and cfg['subtitleMode']=='cloud':channels.append('subtitle')
     if kind=='pipeline' and cfg['autoText']:channels.append('text')
@@ -1617,7 +1726,7 @@ def job_preflight(body, *, config=None):
             choices=connections.candidates(cfg,channel)
             if choices:
                 interfaces.append(label+'：'+' → '.join(c['name'] for c in choices))
-                if not any(ai.get_key(connections.bound(cfg,c),channel) for c in choices):errors.append(label+'接口缺少本次会话密钥，请到AI接口管理填写')
+                if not any(ai.get_key(connections.bound(cfg,c),channel) for c in choices):errors.append(label+'接口缺少本次会话密钥，请到'+('AI去字幕 → 设置 → 云端服务连接' if channel=='subtitle' else '文案与封面 → 设置')+'填写')
             elif channel=='subtitle':
                 interfaces.append(label+'：原配置接口')
                 if not cfg['subtitleEndpoint']:errors.append('云端去字幕接口未配置')
@@ -1636,16 +1745,18 @@ def job_preflight(body, *, config=None):
     return {'ok':not errors,'errors':errors,'warnings':warnings,'count':len(videos),'files':[v['name'] for v in videos],
             'output':str(output),'estimatedBytes':estimate,'freeBytes':free,'subtitle':uses_subtitle,
             'subtitleMode':cfg['subtitleMode'],'subtitleRegions':subtitle_regions(cfg) if uses_subtitle else [],
+            'subtitlePreserveTailSeconds':cfg.get('subtitlePreserveTailSeconds',0) if uses_subtitle else 0,
             'width':cfg['width'],'height':cfg['height'],'regroup':cfg['regroup'],'interfaces':interfaces,
             'workflowPlan':production_plan(kind,cfg,continuing)}
 
 def create_job(body, *, config=None, flow_id=None, operation_id=None):
-    licensing.require(DATA)
+    if QUEUE_STOP.is_set():raise ValueError('服务正在关闭，请重新打开应用后继续')
     if operation_id:
         with LOCK:
             existing=next((j for j in JOBS.values() if j.get('flowId')==flow_id and j.get('operationId')==operation_id),None)
             if existing:return {'id':existing['id'],'reused':True}
     kind=body.get('kind','pipeline')
+    if kind in RETIRED_PROMOTION_JOB_KINDS:raise ValueError('发布挂载与跳转核对已移除，AI 高光与混剪仍可使用')
     if kind=='track_sheet':raise ValueError('自绘工程图功能已移除，请改用剪映可编辑工程和官方窗口截图')
     if kind not in LOCAL_JOB_KINDS|{'login','upload'}:
         raise ValueError('未知任务类型')
@@ -1714,6 +1825,29 @@ def create_job(body, *, config=None, flow_id=None, operation_id=None):
             if not preflight['ok']:raise ValueError('；'.join(preflight['errors']))
     elif 'sourceVideoPaths' in body:raise ValueError('此制作类型不支持指定源视频集数')
     if kind=='highlight':highlight_render.validate(cfg,True)
+    if kind in ('promotion_analyse','promotion_render','promotion_auto'):
+        if len(ids)!=1:raise ValueError('智能推广一次处理一部剧')
+        p=get_project(ids[0])
+        if not p['rights']:raise ValueError('请先确认本剧的剪辑与推广授权')
+        if any(j['status'] in ('queued','running','pausing','paused') and ids[0] in j['ids'] and j['kind'].startswith('promotion_') for j in JOBS.values()):
+            raise ValueError('本剧已有推广任务，请先等待或停止当前任务')
+        studio=promotion_studio.settings(p,{**body.get('studio',p.get('promotionStudio',{})), 'targets':{}, 'autoDispatch':False},STATE['accounts'])
+        options={'studio':studio,'promotionSources':promotion_studio.checked_sources(p,studio)}
+        options['engineOptions']=promotion_engines.snapshot(cfg,studio['engine'])
+        promotion_engines.preflight(studio['engine'],options['engineOptions'],options['promotionSources'],kind)
+        if studio['engine']=='local':options.update(promotion_engines.local_backend(options['engineOptions'],kind))
+        elif folder:=cfg['promotionEngineSettings']['mediakit']['downloadFolder']:
+            if Path(folder).resolve().is_relative_to(Path(p['source']).resolve()):
+                raise ValueError('云端成片保存文件夹请选择原片目录以外的位置')
+            cfg['output']=writable_storage(folder,'云端成片保存文件夹：')
+            project_dir(p,cfg)
+        if kind=='promotion_render':
+            analysis=p.get('promotionAnalysis')
+            if not analysis:raise ValueError('请先完成 AI 高光分析')
+            promotion_studio.check_sources(analysis['sources'])
+            if [v['path'] for v in analysis['sources']]!=studio['sourcePaths']:raise ValueError('选集已变化，请重新分析高光')
+            options['analysis']=copy.deepcopy(analysis)
+        store_promotion_settings(p,studio)
     if kind=='hook':
         if len(ids)!=1:raise ValueError('一次请选择一部剧制作钩子')
         p=get_project(ids[0])
@@ -1733,12 +1867,6 @@ def create_job(body, *, config=None, flow_id=None, operation_id=None):
         options={'videoIndex':index,'start':start,'seconds':seconds,'title':promotions.text(body.get('title',p['name']+' · 高光钩子'),'钩子标题',100,True),
             'cta':promotions.text(body.get('cta',''),'结尾引导文字',80)}
         st=Path(v['path']).stat();options.update(hookSource=copy.deepcopy(v),hookSourceKind=source_kind,hookSourceStat={'bytes':st.st_size,'mtime':st.st_mtime_ns})
-    if kind=='promotion_package':
-        if len(ids)!=1:raise ValueError('一次请选择一部剧导出推广任务')
-        row=promotions.task(STATE,body.get('promotionTaskId'))
-        if row['projectId']!=ids[0] or row['status']=='cancelled':raise ValueError('推广任务与剧集不匹配或已取消')
-        if not get_project(ids[0])['rights']:raise ValueError('请先确认素材授权')
-        options={'promotionTask':copy.deepcopy(row)}
     if kind in ['preview','transform_preview','playback']:
         if len(ids)!=1:raise ValueError('一次只试处理一部剧的视频')
         index=body.get('videoIndex',0)
@@ -1750,13 +1878,15 @@ def create_job(body, *, config=None, flow_id=None, operation_id=None):
             if type(seconds) is not int or seconds not in [5,10]:raise ValueError('试处理时长请选择5秒或10秒')
             options.update(start=start,seconds=min(seconds,video['duration']-start))
     with LOCK:
+        if QUEUE_STOP.is_set():raise ValueError('服务正在关闭，请重新打开应用后继续')
+        if kind.startswith('promotion_'):
+            if any(j['status'] in ('queued','running','pausing','paused') and ids[0] in j['ids'] and j['kind'].startswith('promotion_') for j in JOBS.values()):
+                raise ValueError('本剧已有推广任务，请等待或停止当前任务')
         if operation_id:
             existing=next((j for j in JOBS.values() if j.get('flowId')==flow_id and j.get('operationId')==operation_id),None)
             if existing:return {'id':existing['id'],'reused':True}
         if flow_id and kind in ('pipeline','transcode','subtitle','highlight') and any(j.get('flowId')!=flow_id and j['status'] in ('queued','running','pausing','paused','interrupted') and j['kind'] in ('pipeline','transcode','subtitle','highlight') and set(ids).intersection(j['ids']) for j in JOBS.values()):
             raise ValueError('所选剧目已有制作任务，请先完成或停止原任务')
-        if kind in ('pipeline','transcode','subtitle','highlight') and any(f['id']!=flow_id and f['status'] not in ('completed','cancelled') and set(ids).intersection(f['projectIds']) for f in STATE.get('studioFlows',{}).get('flows',[])):
-            raise ValueError('所选剧目正在连续流程中，请在开始工作页恢复或停止流程')
         if kind in ['login','upload'] and any(j['status'] in ['queued','running','pausing'] for j in JOBS.values()):raise ValueError('请先完成制作队列，再核对登录或上传任务')
         if parent:
             existing=next((j for j in JOBS.values() if j.get('options',{}).get('continueFromJob')==parent['id'] and j['status']!='cancelled'),None)
@@ -1764,9 +1894,12 @@ def create_job(body, *, config=None, flow_id=None, operation_id=None):
         jid=uuid.uuid4().hex[:12]
         JOBS[jid]={'id':jid,'kind':kind,'ids':ids,'status':'queued','stage':'准备中','progress':0,'created':time.time(),
                    'accountIds':account_ids,'completedStages':[],'cancel':threading.Event(),'processes':set(),
-                   'config':cfg,'options':options,'sourceSnapshot':source_snapshot(ids,options.get('sourceVideoPaths')),'checkpoints':{},'attempts':1,'queueAt':time.time(),
+                   'config':cfg,'options':options,'sourceSnapshot':{} if kind=='rewrite' else source_snapshot(ids,options.get('sourceVideoPaths')),'checkpoints':{},'attempts':1,'queueAt':time.time(),
                    'flowId':flow_id,'operationId':operation_id}
-        persist_jobs()
+        try:persist_jobs()
+        except Exception:
+            JOBS.pop(jid,None)
+            raise
     ensure_runner()
     return {'id':jid}
 
@@ -1782,6 +1915,91 @@ def store_config(cfg):
             try:save()
             except Exception:pass
             raise
+
+def writable_storage(value,label):
+    if not isinstance(value,str) or not value.strip() or not Path(value).expanduser().is_absolute():
+        raise ValueError(label+'请选择完整的文件夹路径')
+    folder=Path(value).expanduser().resolve()
+    if folder==Path(folder.anchor) or folder in {ROOT.resolve(),DATA.resolve(),APP_HOME.resolve()}:
+        raise ValueError(label+'请选择独立文件夹，不能使用盘符根目录或程序、数据目录')
+    try:
+        folder.mkdir(parents=True,exist_ok=True)
+        with tempfile.TemporaryFile(prefix='.manju-write-',dir=folder) as handle:
+            handle.write(b'manju storage check');handle.flush()
+    except OSError as error:
+        raise ValueError(label+'无法写入，请选择有写入权限且磁盘可用的文件夹：'+str(folder)) from error
+    return str(folder)
+
+def storage_settings(body):
+    """Validate both destinations before committing settings; never move old files."""
+    with LOCK:
+        raw_output=body.get('output',STATE['config']['output'])
+        if not isinstance(raw_output,str) or not raw_output.strip() or not Path(raw_output).expanduser().is_absolute():raise ValueError('文件保存位置请选择完整的文件夹路径')
+        cfg=validate_config(copy.deepcopy(STATE['config'])|{'output':body.get('output',STATE['config']['output'])})
+        preferences=copy.deepcopy(body.get('options',STATE.get('jianyingOptions',{})))
+        if not isinstance(preferences,dict):raise ValueError('工程图设置无效')
+        if 'jianyingOutput' in body:preferences['output']=body['jianyingOutput']
+        raw_project_output=preferences.get('output','')
+        if not isinstance(raw_project_output,str) or (raw_project_output.strip() and not Path(raw_project_output).expanduser().is_absolute()):raise ValueError('剪映工程位置请选择完整的文件夹路径')
+        custom=body.get('custom',STATE.get('jianyingCustom',False))
+        if type(custom) is not bool:raise ValueError('工程图方案无效')
+        if custom:opts=jianying_projects.options(preferences)
+        else:
+            import jianying_jobs
+            opts=jianying_jobs.automatic_options(preferences,cfg)
+        cfg['output']=writable_storage(cfg['output'],'文件保存位置：')
+        if opts['output']:
+            if 'options' in body or 'jianyingOutput' in body:opts['output']=writable_storage(opts['output'],'剪映工程位置：')
+        else:writable_storage(str(Path(cfg['output'])/'剪映工程'),'剪映工程位置：')
+        writable_storage(str(Path(cfg['output'])/'工程图'),'工程图位置：')
+        previous={k:copy.deepcopy(STATE.get(k)) for k in ('config','jianyingOptions','jianyingCustom')}
+        STATE.update(config=cfg,jianyingOptions=opts,jianyingCustom=custom)
+        try:save()
+        except Exception:
+            for key,value in previous.items():
+                if value is None:STATE.pop(key,None)
+                else:STATE[key]=value
+            try:save()
+            except Exception:pass
+            raise
+        return {'config':cfg,'options':opts,'custom':custom,'saved':True}
+
+def relink_project(body):
+    """Reconnect existing episode records, without rescanning away edited metadata."""
+    with LOCK:
+        p=get_project(body.get('id'))
+        if any(p['id'] in j['ids'] and j['status'] in ('queued','running','pausing') for j in JOBS.values()):
+            raise ValueError('该剧正在处理，请先暂停或停止任务后再重新定位素材')
+        value=body.get('directory')
+        if not isinstance(value,str) or not value.strip():raise ValueError('请选择视频现在所在的文件夹')
+        directory=Path(value).expanduser().resolve();old_root=Path(p['source']).resolve()
+        if not directory.is_dir():raise ValueError('所选素材文件夹不存在')
+        paths={};entries=[]
+        for video in p['videos']:
+            old=Path(video['path']).resolve()
+            relative=old.relative_to(old_root) if old.is_relative_to(old_root) else Path(old.name)
+            new=(directory/relative).resolve()
+            if not new.is_relative_to(directory) or not new.is_file():raise ValueError('所选文件夹缺少视频：'+str(relative)+'；请选择该剧完整素材所在的文件夹')
+            if new.stat().st_size!=video['bytes']:raise ValueError('视频大小与原素材不符：'+str(relative)+'；请核对是否选择了同一份素材')
+            info=probe(new)
+            if any(info.get(k)!=video.get(k) for k in ('width','height')) or abs(info['duration']-video['duration'])>.1:
+                raise ValueError('视频信息与原素材不符：'+str(relative))
+            entries.append({**video,**info,'path':str(new)})
+            paths[video['path']]=str(new)
+        if not entries:raise ValueError('该剧没有可重新定位的视频，请先导入素材')
+        previous=copy.deepcopy(p);p.update(source=str(directory),videos=entries)
+        if p.get('cover'):
+            cover=Path(p['cover']).resolve()
+            if cover.is_relative_to(old_root):
+                target=directory/cover.relative_to(old_root)
+                if target.is_file():p['cover']=str(target)
+        try:save()
+        except Exception:
+            p.clear();p.update(previous)
+            try:save()
+            except Exception:pass
+            raise
+        return {'project':copy.deepcopy(p),'paths':paths,'message':'已重新定位素材；旧任务记录保留，后续制作请创建新任务。'}
 
 def transform_presets(body):
     """Persist named picture settings without paths, secrets or task state."""
@@ -1833,10 +2051,11 @@ def source_manager():
         return SOURCE_MANAGER
 
 def public_state():
-    studio_flows=flow_manager().public()
     with LOCK:
         result=copy.deepcopy(STATE)
-        result['studioFlows']=studio_flows
+        # Retain legacy records on disk without loading their dispatcher or
+        # exposing retired workflow snapshots in the current workspace.
+        result.pop('studioFlows',None)
         result.pop('studioFlowTasks',None)
         result['jobs']=[{**{k:v for k,v in j.items() if k not in ['cancel','processes','config','sourceSnapshot','checkpoints']},
                          'diagnostic':telemetry.job_failure(j,redact=diagnostic_text),
@@ -1844,22 +2063,14 @@ def public_state():
                          'telemetry':telemetry.snapshot(j),'completedProjects':sum(k.endswith(':project-done') for k in j.get('checkpoints',{})),
                          'checkpointCount':len(j.get('checkpoints',{})), 'resumable':j['kind'] in LOCAL_JOB_KINDS and j['kind']!='track_sheet'} for j in JOBS.values()][-200:]
         result['secrets']={k:bool(v) for k,v in SECRETS.items()}
+        promotion_engines.public_jobs(result['jobs'])
         result['aiKeyStatus']=ai.key_status(result['config'])
         result['aiProviders']=ai.PRESETS
         result['connectionKeyStatus']=connections.key_status(result['config'])
         result['promotionSummary']=promotions.summary(STATE)
         result['promotionEntryTypes']=promotions.TYPES
+        result['promotionPlatforms']=promotion_studio.PLATFORMS
         return result
-
-
-def flow_manager():
-    global STUDIO_FLOW_MANAGER,STUDIO_FLOW_ADAPTER
-    with LOCK:
-        if STUDIO_FLOW_MANAGER is None:
-            STUDIO_FLOW_ADAPTER=studio_flow_adapter.Adapter(sys.modules[__name__])
-            STUDIO_FLOW_MANAGER=studio_flow.Manager(STATE,LOCK,save,STUDIO_FLOW_ADAPTER)
-            STUDIO_FLOW_MANAGER.start_background(.75)
-        return STUDIO_FLOW_MANAGER
 
 
 def publish_workspace():
@@ -1902,6 +2113,45 @@ def editor_result(body):
     if not job or job['kind']!='jianying_project' or type(index) is not int or not 0<=index<len(job.get('jianyingResults',[])):
         raise ValueError('请选择已完成的剪映工程')
     return job,job['jianyingResults'][index]
+
+def reconnect_editor_result(body):
+    with LOCK:
+        job,row=editor_result(body)
+        if job['status'] in ('queued','running','pausing'):raise ValueError('本批工程正在处理，请先暂停或停止后再重新定位')
+        value=body.get('directory')
+        if not isinstance(value,str) or not value.strip():raise ValueError('请选择包含 manju_project.json 的工程文件夹')
+        folder=Path(value).expanduser().resolve();index=jianying_projects.check(folder,validate_paths=False)
+        if index.get('sourceSHA256')!=row.get('sourceSHA256') or index.get('name')!=row.get('name'):
+            raise ValueError('所选工程与本条记录不匹配，请选择原工程移动后的完整文件夹')
+        old=Path(row['directory']).resolve()
+        previous_row=copy.deepcopy(row);previous_checkpoints=copy.deepcopy(job.get('checkpoints',{}))
+        previous_artifacts={p['id']:copy.deepcopy(p['artifacts']) for p in STATE['projects']}
+        result=jianying_projects.relocate(folder);index=jianying_projects.check(folder)
+        row.update(directory=str(folder),path=str(folder/'draft_content.json'),manifest=str(folder/'manju_project.json'),
+                   draftSHA256=index['draftSHA256'],manifestSHA256=jianying_projects.sha(folder/'manju_project.json'),editorValidated=False)
+        row.pop('editorImport',None);row.pop('editorOpen',None)
+        def mapped(value):
+            path=Path(value).resolve()
+            return folder/path.relative_to(old) if path.is_relative_to(old) else None
+        for p in STATE['projects']:
+            for artifact in p['artifacts']:
+                target=mapped(artifact['path'])
+                if target and target.is_file():artifact.update(path=str(target),bytes=target.stat().st_size)
+        for key,checkpoint_value in list(job.get('checkpoints',{}).items()):
+            for item in checkpoint_value.get('files',[]):
+                target=mapped(item['path'])
+                if target:
+                    if not target.is_file():
+                        job['checkpoints'].pop(key,None);break
+                    stat=target.stat();item.update(path=str(target),bytes=stat.st_size,mtime=stat.st_mtime_ns)
+        try:save()
+        except Exception:
+            row.clear();row.update(previous_row);job['checkpoints']=previous_checkpoints
+            for p in STATE['projects']:p['artifacts']=previous_artifacts[p['id']]
+            try:save()
+            except Exception:pass
+            raise
+        return {**result,'message':'工程位置已更新，素材已重连。请重新导入剪映并打开对应草稿，再生成工程图。'}
 
 
 def evidence_association(body):
@@ -1980,23 +2230,19 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_header('Content-Length','0');self.end_headers();return
             self.session_check()
             if url.path=='/api/studio-flows':
-                licensing.require(DATA)
-                return self.reply(value=flow_manager().public())
+                return self.reply(410,{'error':'开始工作模块已移除，请使用各功能页面。'})
             if url.path=='/api/publish/workspace':
-                licensing.require(DATA)
                 return self.reply(value=publish_workspace().public())
             if url.path=='/api/project-evidence/list':
-                licensing.require(DATA);pid=q.get('projectId',[''])[0];get_project(pid)
+                pid=q.get('projectId',[''])[0];get_project(pid)
                 return self.reply(value=evidence_manager().list(pid))
             if url.path=='/api/publish/file':
-                licensing.require(DATA)
                 return self.file(publish_workspace().file(q.get('projectId',[''])[0],q.get('path',[''])[0]),q.get('download',['0'])[0]=='1')
             if url.path=='/api/license':return self.reply(value=licensing.status(DATA))
             if url.path=='/api/component':return self.reply(value={'progress':engine_manager.progress(),'active':engine_manager.active(DATA)})
-            if not licensing.status(DATA)['valid']:
-                if url.path in ['/','/index.html']:return self.file(PUBLIC/'activation.html')
-                if url.path not in ['/activation.js','/activation.css']:raise PermissionError('请先激活本机授权')
             if url.path=='/api/state':return self.reply(value=public_state())
+            if url.path=='/api/xiaovmiao':return self.reply(value=XIAOVMIAO.status())
+            if url.path=='/api/promotion/engines':return self.reply(value=promotion_engines.public(STATE['config']))
             if url.path=='/api/source/tasks':return self.reply(value={'tasks':source_manager().list(),'access':hongguo_source.ACCESS.snapshot(),'native':source_manager().core.status()})
             if url.path=='/api/source/report':
                 value=source_manager().report(q.get('id',[''])[0]);data=json.dumps(value,ensure_ascii=False,indent=2).encode('utf-8')
@@ -2044,9 +2290,13 @@ class Handler(BaseHTTPRequestHandler):
             body=json.loads(self.rfile.read(length) or b'{}');path=urllib.parse.urlsplit(self.path).path
             if not isinstance(body,dict):raise ValueError('请求必须为对象')
             if path=='/api/license/activate':return self.reply(value=licensing.activate(DATA,body.get('token','')))
-            licensing.require(DATA)
-            if path=='/api/studio-flows/start':return self.reply(value=flow_manager().start(body))
-            if path=='/api/studio-flows/control':return self.reply(value=flow_manager().control(body.get('id',''),body.get('action',''),body))
+            if path.startswith('/api/promotion/') and path not in ('/api/promotion/inputs','/api/promotion/studio-settings','/api/promotion/engines/settings'):
+                return self.reply(410,{'error':'发布挂载与跳转核对已移除，AI 高光与混剪仍可使用。'})
+            if path=='/api/promotion/engines/settings':return self.reply(value=promotion_engines.configure(sys.modules[__name__],body))
+            if path=='/api/xiaovmiao/settings':return self.reply(value=XIAOVMIAO.configure(body.get('executable'),body.get('profile','')))
+            if path=='/api/xiaovmiao/open':return self.reply(value=XIAOVMIAO.open())
+            if path in ('/api/studio-flows/start','/api/studio-flows/control'):
+                return self.reply(410,{'error':'开始工作模块已移除，请使用各功能页面。'})
             if path=='/api/project-evidence/capture':
                 association=evidence_association(body)
                 return self.reply(value=evidence_manager().capture(association['projectId'],body,association))
@@ -2118,7 +2368,7 @@ class Handler(BaseHTTPRequestHandler):
                 target=Path(job['jianyingResults'][index]['directory']);jianying_projects.check(target)
                 if os.name=='nt':os.startfile(str(target))
                 return self.reply(value={'directory':str(target)})
-            if path=='/api/jianying/relocate':return self.reply(value=jianying_projects.relocate(body.get('directory','')))
+            if path=='/api/jianying/relocate':return self.reply(value=reconnect_editor_result(body) if body.get('jobId') else jianying_projects.relocate(body.get('directory','')))
             if path=='/api/highlight/templates':
                 cfg=validate_config(STATE['config']|{'highlightTailDirectory':body.get('directory',STATE['config']['highlightTailDirectory'])})
                 return self.reply(value={'files':[p.name for p in highlight_render.templates(cfg)]})
@@ -2156,35 +2406,21 @@ class Handler(BaseHTTPRequestHandler):
                 if not target or not target.is_dir():raise ValueError('该任务还没有保存目录')
                 if os.name=='nt':os.startfile(str(target))
                 return self.reply(value={'path':str(target)})
-            if path.startswith('/api/promotion/'):
+            if path=='/api/promotion/studio-settings':
                 with LOCK:
-                    if path=='/api/promotion/entry':
-                        p=get_project(body.get('projectId'));p['promotionEntry']=promotions.entry(body.get('entry'))
-                        p.setdefault('promotionEntries',{})[p['promotionEntry']['type']]=copy.deepcopy(p['promotionEntry']);save();return self.reply(value={'entry':p['promotionEntry']})
-                    if path=='/api/promotion/task':
-                        result=promotions.make_task(STATE,get_project(body.get('projectId')),body);save();return self.reply(value=result)
-                    if path=='/api/promotion/receipt':
-                        result=promotions.record(STATE,body);save();return self.reply(value=result)
-                    if path=='/api/promotion/cancel':
-                        row=promotions.task(STATE,body.get('taskId'))
-                        if row['status']=='submitted':raise ValueError('已人工确认发布的任务保留记录，不能直接取消')
-                        row.update(status='cancelled',mountStatus='pending',updatedAt=time.time());save();return self.reply(value=row)
-                    if path=='/api/promotion/dispatch':
-                        row=promotions.task(STATE,body.get('taskId'))
-                        if row['status'] in ['submitted','cancelled']:raise ValueError('该任务已提交或取消，请核对记录，避免重复发布')
-                        row.update(status='awaiting_manual',updatedAt=time.time());save()
-                        return self.reply(value={'url':row['entry']['backendUrl'],'task':row,'message':'请在平台选择挂载入口并发布，然后回填核对结果'})
-                    if path=='/api/promotion/revenue':
-                        result=promotions.save_revenues(STATE,[body]);save();return self.reply(value=result)
-                    if path=='/api/promotion/revenue-import':
-                        result=promotions.import_csv(STATE,body.get('csv',''));save();return self.reply(value=result)
-                return self.reply(404,{'error':'推广接口不存在'})
+                    p=get_project(body.get('projectId'))
+                    value=body.get('settings')
+                    if not isinstance(value,dict):raise ValueError('混剪配置格式无效')
+                    clean=promotion_studio.settings(p,{**value,'targets':{},'autoDispatch':False},STATE['accounts'])
+                    settings_by_engine=store_promotion_settings(p,clean)
+                    return self.reply(value={'settings':p['promotionStudio'],'settingsByEngine':settings_by_engine})
             if path=='/api/component/import':
                 def apply_engine(value):
                     with LOCK:
                         STATE['config'].update(vsrRoot=value['root'],vsrPython=value['python'],vsrMode=value['verifiedMode'],subtitleMode='vsr');save()
                 engine_manager.start(body.get('path',''),DATA,apply_engine)
                 return self.reply(value={'started':True})
+            if path=='/api/storage/settings':return self.reply(value=storage_settings(body))
             if path=='/api/config':
                 with LOCK:
                     cfg=validate_config(copy.deepcopy(STATE['config'])|{k:v for k,v in body.items() if k in DEFAULT})
@@ -2209,6 +2445,13 @@ class Handler(BaseHTTPRequestHandler):
                 return self.reply(value={'saved':True,'status':ai.key_status(STATE['config'])})
             if path=='/api/ai/models':
                 return self.reply(value={'models':ai.list_models(STATE['config'],body.get('channel','text'))})
+            if path=='/api/ai/discover-models':
+                cfg=copy.deepcopy(STATE['config']);channel=body.get('channel','text')
+                if body.get('id'):
+                    c=next((c for c in cfg['aiConnections'] if c['id']==body['id'] and c['channel']==channel),None)
+                    if c is None:raise ValueError('连接不存在或用途不匹配')
+                    cfg=connections.bound(cfg,c)
+                return self.reply(value=ai.discover_models(cfg,channel,body.get('connection'),body.get('key')))
             if path=='/api/ai/connections':
                 with LOCK:
                     cfg=copy.deepcopy(STATE['config']);items=cfg['aiConnections'];action=body.get('action','upsert');cid=body.get('id') or body.get('connection',{}).get('id')
@@ -2250,8 +2493,8 @@ class Handler(BaseHTTPRequestHandler):
                     if c['channel']=='text':
                         result=ai.text_generate(selected,'你是连接测试助手。','请仅回复OK。',64)
                         result={'ok':True,'method':'text_call','output':ai.redact(result['text']),'model':ai.redact(result['model'])}
-                    elif c['channel']=='image':
-                        models=ai.list_models(selected,c['channel']);result={'ok':True,'method':'model_list','models':models[:20],'modelFound':c['model'] in models,'note':'仅验证模型列表，不代表已实际生成图片'}
+                    elif c['channel'] in ['image','subtitle']:
+                        models=ai.list_models(selected,c['channel']);result={'ok':True,'method':'model_list','models':models[:20],'modelCount':len(models),'modelFound':c['model'] in models,'note':'仅验证模型列表，请用短片试处理验证去字幕能力' if c['channel']=='subtitle' else '仅验证模型列表，不代表已实际生成图片'}
                     else:raise ValueError('字幕适配器请用5秒样片试处理，接口没有统一无素材测试契约')
                     result.update(seconds=round(time.monotonic()-started,3),testedAt=time.time())
                 except Exception as error:
@@ -2260,6 +2503,7 @@ class Handler(BaseHTTPRequestHandler):
                 with LOCK:STATE.setdefault('aiConnectionTests',{})[c['id']]=result;save()
                 return self.reply(value=result)
             if path=='/api/scan':return self.reply(value=scan(body.get('source','')))
+            if path=='/api/project/relink':return self.reply(value=relink_project(body))
             if path=='/api/project':
                 with LOCK:
                     p=get_project(body['id'])
@@ -2277,7 +2521,6 @@ class Handler(BaseHTTPRequestHandler):
             if path=='/api/remove':
                 with LOCK:
                     pid=body['id']
-                    if any(f['status'] not in ('completed','cancelled') and pid in f['projectIds'] for f in STATE.get('studioFlows',{}).get('flows',[])):raise ValueError('剧目正在连续流程中，请先停止对应流程')
                     if any(pid in j['ids'] and j['status'] in ['running','queued','pausing'] for j in JOBS.values()):raise ValueError('任务运行中，不能移除')
                     STATE['projects']=[p for p in STATE['projects'] if p['id']!=pid];save()
                 return self.reply(value={'removed':True})
@@ -2322,8 +2565,16 @@ class Handler(BaseHTTPRequestHandler):
                     log('打开文件选择窗口失败：'+str(error),level='error')
                     raise
             if path=='/api/open-output':
-                target=project_dir(get_project(body['id']),STATE['config']) if body.get('id') else Path(STATE['config']['output']).resolve()
-                target.mkdir(parents=True,exist_ok=True)
+                if body.get('jobId'):
+                    job=JOBS.get(body['jobId'])
+                    if not job or job.get('options',{}).get('studio',{}).get('engine')!='mediakit':
+                        raise ValueError('未找到云端混剪任务')
+                    saved=next((item for item in (job.get('result') or {}).get('paths',[]) if Path(item).is_file()),None)
+                    if saved is None:raise ValueError('该任务的成片尚未下载或已被移走')
+                    target=allowed_file(saved).parent
+                else:
+                    target=project_dir(get_project(body['id']),STATE['config']) if body.get('id') else Path(STATE['config']['output']).resolve()
+                    target.mkdir(parents=True,exist_ok=True)
                 if os.name=='nt':os.startfile(str(target))
                 return self.reply(value={'path':str(target)})
             return self.reply(404,{'error':'接口不存在'})

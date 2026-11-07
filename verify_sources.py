@@ -33,24 +33,28 @@ def run(live=False):
         assert rejected(lambda:h.resource_url(url,True))
     check('resource_redirect_host_allowlist')
     class R(io.BytesIO):
-        def __init__(self,b,total):super().__init__(b);self.headers={'Content-Length':total}
+        def __init__(self,b,total):super().__init__(b);self.headers={'Content-Length':total};self.status=200
     out=BASE/'cut.mp4';event=threading.Event()
-    with patch.object(h,'response',return_value=R(b'abc','20')):
-        check('truncated_download_never_promoted',rejected(lambda:h.download(h.BASE+'/video/public/123/360p.mp4',out,event,lambda n,t:None)) and not out.exists() and not out.with_suffix('.mp4.part').exists())
+    with patch.object(h,'response',side_effect=lambda *a,**k:R(b'abc','20')):
+        check('truncated_download_never_promoted_and_partial_retained',rejected(lambda:h.download(h.BASE+'/video/public/123/360p.mp4',out,event,lambda n,t:None)) and not out.exists() and out.with_suffix('.mp4.part').read_bytes()==b'abc')
     values=[]
     with patch.object(h,'response',return_value=R(b'abc','')):
         h.download(h.BASE+'/video/public/123/360p.mp4',out,event,lambda n,t:values.append((n,t)))
-    check('unknown_length_keeps_total_unknown',values==[(3,None)] and out.read_bytes()==b'abc')
+    check('unknown_length_keeps_total_unknown',values[0]==(0,None) and values[-1]==(3,None) and all(total is None for _,total in values) and out.read_bytes()==b'abc')
     out.unlink();event.set()
     with patch.object(h,'response',return_value=R(b'abc','3')):
         try:h.download(h.BASE+'/video/public/123/360p.mp4',out,event,lambda n,t:None)
         except h.Cancelled:pass
         else:raise AssertionError('cancel not honored')
-    check('cancellation_removes_partial',not out.exists() and not out.with_suffix('.mp4.part').exists())
+    check('cancellation_before_transfer_creates_no_output',not out.exists() and not out.with_suffix('.mp4.part').exists())
     control=threading.Event()
     managerdata=BASE/'queue-data';managerdata.mkdir()
     m=h.Manager(managerdata,lambda *a:None,lambda *a:None)
-    with patch.object(h,'resolve',side_effect=lambda url:(control.wait(5),{})[1]):
+    def blocked_resolve(self,url,refresh=False,cancel=None):
+        control.wait(5)
+        if cancel and cancel.is_set():raise h.Cancelled()
+        return {}
+    with patch.object(h.Manager,'resolve',blocked_resolve):
         one=m.start({'url':h.BASE+'/detail?series_id=123456','directory':str(BASE),'video':False})
         # Wait until the first row has actually entered the worker.
         until=time.monotonic()+3

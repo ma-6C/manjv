@@ -7,7 +7,7 @@ from pathlib import Path
 import hongguo_source as web
 import official_hongguo_share as official_share
 import unicodedata
-from source_imports import ImportManager
+from source_imports import ImportManager, declared_media_seconds
 
 PREFIX='guoapp://hongguo/'
 
@@ -75,6 +75,14 @@ class Core:
                 settings['downloadConcurrency']=concurrency
                 self.call({'action':'saveResourceSettings','settings':settings})
             self.download_concurrency=concurrency
+    def prepare_download(self,drama,index):
+        plan=self.call({'action':'localPlayback','drama':drama,'index':index})
+        if not isinstance(plan,dict):raise ValueError('原生下载未返回有效的本地媒体计划')
+        plan=copy.deepcopy(plan)
+        expected=declared_media_seconds({},plan)
+        if expected is not None:plan['expectedDurationSeconds']=expected
+        else:plan.pop('expectedDurationSeconds',None)
+        return plan
     def cover(self,drama):
         with self.lock:lock=self.cover_locks.setdefault(drama['id'],threading.Lock())
         with lock,self.cover_slots:
@@ -190,7 +198,7 @@ class Adapter:
                 if job['state']=='paused':self.core.call({'action':'controlDownloads','jobId':job_id,'command':'resume'})
                 if time.monotonic()>deadline:raise ValueError('下载连接中断：原生下载超时，可继续重试')
                 cancel.wait(.35)
-            plan=self.core.call({'action':'localPlayback','drama':drama,'index':index})
+            plan=self.core.prepare_download(drama,index)
             source=Path(plan.get('url','')).resolve()
             if not plan.get('local') or not source.is_relative_to((self.core.data/'downloads').resolve()) or not source.is_file():raise ValueError('原生下载文件路径无效')
             progress(source.stat().st_size,source.stat().st_size)

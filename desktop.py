@@ -7,10 +7,11 @@ import traceback
 
 ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT / 'vendor'))
-import server
-import licensing,local_session
+import licensing,local_session,runtime_paths
 
 def main():
+    global server
+    import server
     licensing.verify_distribution(server.APP_HOME)
     import webview
     import ctypes,hashlib
@@ -30,11 +31,11 @@ def main():
     thread = threading.Thread(target=service.serve_forever, daemon=True)
     thread.start()
     window = webview.create_window('漫剧工坊', f'http://127.0.0.1:{port}/launch/{service.session.launch}',
-        width=1440, height=960, min_size=(1024, 720), background_color='#f7f8fc',
+        width=1440, height=960, min_size=(1024, 720), maximized=True, background_color='#f7f8fc',
         text_select=True, confirm_close=False)
     server.NATIVE_BROWSE=lambda spec:server.file_picker.native_selection(window,spec)
     def on_closing():
-        active = any(j['status'] in ['queued', 'running', 'pausing'] for j in server.JOBS.values()) or bool(server.SOURCE_MANAGER and any(j['status'] in ['queued','running'] for j in server.SOURCE_MANAGER.list())) or any(f['status']=='running' for f in server.STATE.get('studioFlows',{}).get('flows',[]))
+        active = any(j['status'] in ['queued', 'running', 'pausing'] for j in server.JOBS.values()) or bool(server.SOURCE_MANAGER and any(j['status'] in ['queued','running'] for j in server.SOURCE_MANAGER.list()))
         if active:
             return window.create_confirmation_dialog('任务仍在运行', '关闭后任务和已完成检查点会保留，重新打开后可继续。确定关闭？')
         return True
@@ -51,14 +52,16 @@ def main():
         kernel.CloseHandle(instance)
 
 if __name__ == '__main__':
-    if '--engine-worker' in sys.argv:
-        licensing.verify_distribution(server.APP_HOME)
-        licensing.require(server.DATA)
-        sys.argv.remove('--engine-worker')
-        import engine_bridge
-        engine_bridge.main()
-        sys.exit(0)
     try:
+        # Loading saved projects is part of startup and can fail before a window exists.
+        # Keep it inside this guard so pythonw launches give a visible, actionable error.
+        import server
+        if '--engine-worker' in sys.argv:
+            licensing.verify_distribution(server.APP_HOME)
+            sys.argv.remove('--engine-worker')
+            import engine_bridge
+            engine_bridge.main()
+            sys.exit(0)
         if '--install-engine' in sys.argv:
             licensing.verify_distribution(server.APP_HOME)
             import engine_manager
@@ -66,9 +69,15 @@ if __name__ == '__main__':
         else:main()
     except Exception:
         text = traceback.format_exc()
-        (server.DATA / 'desktop-error.log').write_text(text, encoding='utf-8')
+        log_path=runtime_paths.data_home()/'desktop-error.log'
+        try:
+            log_path.parent.mkdir(parents=True,exist_ok=True)
+            log_path.write_text(text,encoding='utf-8')
+            detail='\n详细记录：'+str(log_path)
+        except OSError:
+            detail='\n无法写入启动日志，请检查数据目录权限。'
         try:
             import ctypes
-            if '--install-engine' not in sys.argv:ctypes.windll.user32.MessageBoxW(0, str(sys.exc_info()[1])+'\n详细记录：'+str(server.DATA/'desktop-error.log'), '漫剧工坊', 16)
+            if '--install-engine' not in sys.argv and '--engine-worker' not in sys.argv:ctypes.windll.user32.MessageBoxW(0,str(sys.exc_info()[1])+detail,'漫剧工坊',16)
         except Exception:pass
         sys.exit(1)

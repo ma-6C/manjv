@@ -1,7 +1,6 @@
-"""HTTP checks of the new source routes, with isolated data and simulated license states."""
+"""Source HTTP access with a local app session and no device activation."""
 from pathlib import Path
-import http.cookiejar,json,os,re,sys,threading,time,urllib.request,urllib.error
-from unittest.mock import patch
+import http.cookiejar,json,os,sys,threading,time,urllib.request,urllib.error
 ROOT=Path(__file__).resolve().parent
 COMPILED='--compiled' in sys.argv;VERSION=sys.argv[sys.argv.index('--version')+1] if '--version' in sys.argv else 'v0.8.4'
 sys.dont_write_bytecode=True;DIST=ROOT/'release'/VERSION/'漫剧工坊'
@@ -11,8 +10,7 @@ sys.path[:0]=([str(DIST/'_internal')] if COMPILED else [])+[str(ROOT/'vendor')]
 import server as s,local_session
 if COMPILED:
     assert s.__file__.endswith('.pyd');sys.frozen=True;s.licensing.verify_distribution(DIST)
-    token=re.search(r'MJ1\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+',(ROOT/'授权管理/本机长期授权码.txt').read_text('utf-8-sig')).group(0)
-    assert s.licensing.activate(s.DATA,token)['valid'];s.PUBLIC=DIST/'_internal/web'
+    s.PUBLIC=DIST/'_internal/web'
 host=s.ThreadingHTTPServer(('127.0.0.1',0),s.Handler);host.session=local_session.Session()
 thread=threading.Thread(target=host.serve_forever,daemon=True);thread.start()
 base='http://127.0.0.1:'+str(host.server_address[1]);checks=[]
@@ -32,16 +30,9 @@ try:
     assert request('/api/source/tasks',opener=urllib.request.build_opener())[0]==403;checks.append('source_history_requires_session')
     assert request('/api/source/cover?id=123456',opener=urllib.request.build_opener())[0]==403;checks.append('cover_requires_session')
     client.open(base+'/launch/'+host.session.launch).close()
-    with patch.object(s.licensing,'status',return_value={'valid':False,'message':'test unlicensed'}):
-        assert request('/api/source/report?id=missing')[0]==403;checks.append('source_diagnostic_requires_license')
-        assert request('/api/source/tasks')[0]==403
-        assert request('/api/source/cover?id=123456')[0]==403
-        assert request('/api/source/start',{'url':'https://hongguoduanju.com/detail?series_id=123456','directory':str(BASE)})[0]==403
-        assert request('/api/source/resolve',{'text':'https://hongguoduanju.com/category/comic-drama'})[0]==403
-        checks.append('source_routes_all_require_valid_license')
-        for path in ['/api/source/control','/api/source/access-resume','/api/jobs/preflight','/api/promotion/inputs']:
-            assert request(path,{'action':'resume'})[0]==403
-        checks.append('source_control_and_access_resume_require_license')
+    license_state=json.loads(request('/api/license')[1])
+    assert license_state['valid'] and not license_state['required'];checks.append('device_activation_not_required')
+    assert not (s.DATA/'license.bin').exists();checks.append('source_access_uses_fresh_unactivated_profile')
     for path in ['/api/source/control','/api/source/access-resume','/api/jobs/preflight','/api/promotion/inputs']:
         assert request(path,{'action':'resume'},opener=urllib.request.build_opener())[0]==403
     checks.append('source_control_and_access_resume_require_session')

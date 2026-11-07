@@ -2,7 +2,7 @@
 // Keep publishing drafts independent of the polling state. Typing and IME input
 // must not replace the form, move its caret, or reset its scroll position.
 (()=>{
- const model={tab:'drama',workspace:null,drafts:new Map(),dirty:new Set(),plans:new Map(),accountId:'',browser:null,notice:'',loading:false,polling:false,importRows:[],importSelected:new Set(),busy:false};
+ const model={workspace:null,drafts:new Map(),dirty:new Set(),plans:new Map(),accountId:'',browser:null,notice:'',loading:false,polling:false,importRows:[],importSelected:new Set(),busy:false};
  const attachmentGroups=[
   ['coverPath','封面','image','cover','封面图片'],
   ['proofImages','官方工程截图','images','proofImages','从剪映的实际工程窗口采集，并核对截图归属；手动导入的图片来源仍待核验'],
@@ -43,7 +43,7 @@
   return `<div class="publishing-check-overview"><div><strong>${stale?'资料已修改，待重新检查':p.ready?'资料已齐全':'资料待补充'}</strong><p>${stale?'下方保留上次检查结果，请保存并重新检查。':`${ready} 项已准备${missing?` · ${missing} 项待补充`:''} · 检查不代表平台审核通过`}</p></div><span class="tag ${p.ready&&!stale?'green':'gray'}">${stale?'待重新检查':p.ready?'可进入后台':'先补齐资料'}</span></div>`+
    `<div class="publishing-checks">${checks.map(c=>`<div class="publishing-check ${esc(c.status)}"><span class="publishing-check-icon">${icon(c.status==='ready'?'check':c.status==='missing'?'clock':'info')}</span><div><strong>${esc(c.label)}</strong><p>${esc(c.message||'')}</p></div><span class="tag ${c.status==='ready'?'green':'gray'}">${{ready:'已准备',missing:'待补充',warning:'需核对'}[c.status]||'需核对'}</span>${c.status==='ready'?'':c.key==='proofImages'?'<a class="button small" href="#tracks">去采集官方截图</a>':`<button class="button small" data-publishing="locate" data-key="${esc(c.key)}">查看</button>`}</div>`).join('')}</div>`+
    ((p.warnings||[]).length?`<details class="publishing-warnings"><summary>${p.warnings.length} 条需要核对的提示</summary><ul>${p.warnings.map(x=>`<li>${esc(typeof x==='string'?x:x.message||JSON.stringify(x))}</li>`).join('')}</ul></details>`:'')+
-   `<details class="publishing-video-inventory" id="publishing-videos" tabindex="-1"><summary>本次正片视频 · ${(p.files?.videos||[]).length} 集</summary><p class="field-hint">这里只列出确认的成片。需要重新合并切分时，先返回视频处理完成制作。</p><div class="publishing-selected-files">${attachmentFilesHTML('videos',p.files?.videos||[])}</div>${p.files?.videos?.length?'':'<a class="button small" href="#preprocess">去准备正片</a>'}</details>`;
+   `<details class="publishing-video-inventory" id="publishing-videos" tabindex="-1"><summary>本次正片视频 · ${(p.files?.videos||[]).length} 集</summary><p class="field-hint">这里只列出确认的成片。需要重新合并切分时，可在本地素材的高级处理中制作。</p><div class="publishing-selected-files">${attachmentFilesHTML('videos',p.files?.videos||[])}</div>${p.files?.videos?.length?'':'<a class="button small" href="#processing">打开素材高级处理</a>'}</details>`;
  }
  function attachmentHTML([key,label,,fileKey,hint]){
   const selected=draft()[key],files=plan()?.files?.[fileKey],items=key==='coverPath'?(selected?[{path:selected}]:files?[files]:[]):Array.isArray(selected)?selected.map(path=>({path})):Array.isArray(files)?files:[];
@@ -55,7 +55,7 @@
   const accounts=state.accounts||[];
   if(!model.accountId||!accounts.some(a=>a.id===model.accountId))model.accountId=accounts[0]?.id||'';
   if(!model.browser)model.browser=model.workspace?.browser?.[model.accountId]||null;
-  return `<div class="publishing-account-row"><div class="field"><label for="publishing-account">本次提审账号</label><select id="publishing-account" ${accounts.length?'':'disabled'}>${accounts.length?accounts.map(a=>`<option value="${esc(a.id)}" ${a.id===model.accountId?'selected':''}>${esc(a.name)} · ${esc(a.type||'视频号')}</option>`).join(''):'<option>请先添加账号</option>'}</select></div><button class="button" data-publishing="browser-open" ${model.accountId?'':'disabled'}>${icon('external')}打开官方后台</button><button class="button" data-publishing="browser-check" ${model.accountId?'':'disabled'}>${icon('refresh')}检测当前页面</button></div><details class="publishing-add-account"><summary>添加账号备注</summary><div class="publishing-account-row"><div class="field"><label for="publishing-account-name">账号备注名称</label><input id="publishing-account-name" autocomplete="off" placeholder="例如：主账号"></div><button class="button" data-publishing="add-account">${icon('plus')}添加账号</button></div><p class="field-hint">本人在官方页面扫码。提审浏览器资料目录与普通视频上传登录态分别保存。</p></details><div id="publishing-browser-status" class="publishing-browser-status" role="status" aria-live="polite">${browserStatusHTML()}</div><div class="publishing-confirm-note">${icon('info')}<p>在后台打开新增剧目或提审表单后，再辅助填写。填写完成后由本人核对资料并在官方页面确认提交。</p></div><div class="actions-row"><button class="button primary" data-publishing="browser-assist" ${!model.accountId||!plan()?.ready?'disabled':''}>${icon('text')}辅助填写与上传</button><button class="button" data-publishing="browser-close" ${model.accountId?'':'disabled'}>关闭提审窗口</button></div>`;
+  return `<div class="publishing-account-row"><div class="field"><label for="publishing-account">本次提审账号</label><select id="publishing-account" ${accounts.length?'':'disabled'}>${accounts.length?accounts.map(a=>`<option value="${esc(a.id)}" ${a.id===model.accountId?'selected':''}>${esc(a.name)} · ${esc(a.type||'视频号')}</option>`).join(''):'<option>请先添加账号</option>'}</select></div><button class="button" data-publishing="browser-open" ${model.accountId?'':'disabled'}>${icon('external')}打开官方后台</button><button class="button" data-publishing="browser-check" ${model.accountId?'':'disabled'}>${icon('refresh')}检测当前页面</button></div><details class="publishing-add-account"><summary>添加账号备注</summary><div class="publishing-account-row"><div class="field"><label for="publishing-account-name">账号备注名称</label><input id="publishing-account-name" autocomplete="off" placeholder="例如：主账号"></div><button class="button" data-publishing="add-account">${icon('plus')}添加账号</button></div><p class="field-hint">本人在官方页面扫码。此账号备注仅用于本页提审窗口与结果记录。</p></details><div id="publishing-browser-status" class="publishing-browser-status" role="status" aria-live="polite">${browserStatusHTML()}</div><div class="publishing-confirm-note">${icon('info')}<p>在后台打开新增剧目或提审表单后，再辅助填写。填写完成后由本人核对资料并在官方页面确认提交。</p></div><div class="actions-row"><button class="button primary" data-publishing="browser-assist" ${!model.accountId||!plan()?.ready?'disabled':''}>${icon('text')}辅助填写与上传</button><button class="button" data-publishing="browser-close" ${model.accountId?'':'disabled'}>关闭提审窗口</button></div>`;
  }
  function browserStatusHTML(){
   const b=model.browser;if(!b)return '<strong>等待打开后台</strong><p>打开后本人扫码，再检测当前页面的登录状态与可填项。</p>';
@@ -72,8 +72,7 @@
   const rows=(model.workspace?.tasks||[]).filter(t=>t.projectId===pid()).slice(-6).reverse();if(!rows.length)return '';
   return card('提审准备任务','cpu',`<div class="publishing-tasks">${rows.map(t=>`<div class="publishing-task"><span class="tag ${t.status==='completed'?'green':'gray'}">${esc({queued:'排队中',running:'正在处理',completed:'操作完成',failed:'操作失败',interrupted:'已中断'}[t.status]||t.status)}</span><div><strong>${esc({export:'导出提审资料',browser_open:'打开官方后台',browser_check:'检测后台页面',browser_assist:'辅助填写与上传',browser_close:'关闭后台窗口'}[t.kind]||t.kind)}</strong><p>${esc(t.error||t.stage||'')}</p>${t.totalBytes>0?`<progress max="100" value="${Math.max(0,Math.min(100,Number(t.percent)||0))}" aria-label="导出资料复制进度"></progress><small>${esc(size(t.completedBytes||0))} / ${esc(size(t.totalBytes))}</small>`:''}${t.result?.directory?`<small>${esc(t.result.directory)}</small><button class="button small" data-publishing="open-task" data-task="${esc(t.id)}">打开资料目录</button>`:''}</div></div>`).join('')}</div>`,'操作完成仍需本人在官方页面核对提交结果');
  }
- function sliceHTML(){return card('切片发布剧目','layers',picker(),'选择已生成普通视频成片的剧目')+uploadPanel()+card('短剧推广挂载','link','<p class="section-description">需要关联全集入口时，在推广挂载工作区核对钩子素材和推广入口。</p><a class="button" href="#promotion">打开推广挂载工作区</a>');}
- publishPage=function(){return `<div class="publishing-route" data-publishing-project="${esc(pid())}" data-publishing-tab="${model.tab}">`+intro('发布与提审','整理提审资料，连接官方后台，逐项核对提交结果。')+`<div class="publishing-tabs" role="tablist" aria-label="发布类型"><button type="button" role="tab" id="publishing-tab-drama" aria-controls="publishing-panel" aria-selected="${model.tab==='drama'}" data-publishing="tab" data-tab="drama">短剧提审</button><button type="button" role="tab" id="publishing-tab-slice" aria-controls="publishing-panel" aria-selected="${model.tab==='slice'}" data-publishing="tab" data-tab="slice">切片分发</button></div><div id="publishing-notice" role="status" aria-live="polite">${esc(model.notice)}</div><div id="publishing-panel" role="tabpanel" aria-labelledby="publishing-tab-${model.tab}">${model.tab==='drama'?dramaHTML():sliceHTML()}</div></div>`;};
+ publishPage=function(){return `<div class="publishing-route" data-publishing-project="${esc(pid())}">`+intro('短剧提审','整理整部短剧的提审资料，辅助填写官方后台，记录实际审核结果。')+`<div id="publishing-notice" role="status" aria-live="polite">${esc(model.notice)}</div><div id="publishing-panel">${dramaHTML()}</div></div>`;};
  const originalRender=renderPage;
  const originalTaskbar=renderTaskbar;
  renderTaskbar=function(){
@@ -81,15 +80,14 @@
   const button=$('#start-pipeline');if(!button)return;
   delete button.dataset.publishing;
   if(current!=='publish')return;
-  $('#task-title').textContent=model.tab==='drama'?'短剧提审准备':'切片分发';
-  $('#task-detail').textContent=project()?`${project().name} · ${model.tab==='drama'?'先检查资料，再到官方后台本人确认':'普通视频上传，提交前核对清单'}`:'选择或导入一部剧目';
-  if(model.tab==='drama'){delete button.dataset.action;button.dataset.publishing='inspect';button.innerHTML=icon('shield')+'保存并检查资料';button.disabled=!pid()||model.busy;}
-  else{button.dataset.action='upload-review';button.innerHTML=icon('upload')+'核对并上传';button.disabled=!pid()||!!busy();}
+  $('#task-title').textContent='短剧提审准备';
+  $('#task-detail').textContent=project()?`${project().name} · 先检查资料，再到官方后台本人确认`:'选择或导入一部剧目';
+  delete button.dataset.action;button.dataset.publishing='inspect';button.innerHTML=icon('shield')+'保存并检查资料';button.disabled=!pid()||model.busy;
  };
  renderPage=function(){
   if(current!=='publish')return originalRender();
   const mounted=$('.publishing-route');
-  if(mounted&&mounted.dataset.publishingProject===pid()&&mounted.dataset.publishingTab===model.tab){renderNav();renderTaskbar();updatePanels();return;}
+  if(mounted&&mounted.dataset.publishingProject===pid()){renderNav();renderTaskbar();updatePanels();return;}
   originalRender();loadWorkspace();
  };
  function redraw(){const y=window.scrollY;$('#content').innerHTML=publishPage();renderNav();renderTaskbar();window.scrollTo(0,y);}
@@ -120,7 +118,7 @@
   }catch(e){model.notice=e.message;updatePanels();}finally{model.loading=false;}
  }
  async function pollTasks(){
-  if(model.polling||model.loading||current!=='publish'||model.tab!=='drama')return;
+  if(model.polling||model.loading||current!=='publish')return;
   const pending=(model.workspace?.tasks||[]).some(t=>['queued','running'].includes(t.status));if(!pending)return;
   model.polling=true;
   try{const result=await api('publish/workspace');model.workspace=result;model.browser=result.browser?.[model.accountId]||model.browser;updatePanels();}
@@ -147,11 +145,9 @@
  document.addEventListener('input',e=>{const el=e.target;if(el.dataset.publishingField){updateDraft(el.dataset.publishingField,el.type==='checkbox'?el.checked:el.type==='number'?(el.value===''?'':Number(el.value)):el.value);updatePanels();}});
  document.addEventListener('change',e=>{const el=e.target;if(el.dataset.publishingField){updateDraft(el.dataset.publishingField,el.type==='checkbox'?el.checked:el.type==='number'?(el.value===''?'':Number(el.value)):el.value);updatePanels();}if(el.id==='publishing-project'){focusId=el.value;model.browser=null;model.notice='';redraw();}if(el.id==='publishing-account'){model.accountId=el.value;model.browser=null;updatePanels();}if(el.dataset.publishingCandidate!==undefined){const n=Number(el.dataset.publishingCandidate);el.checked?model.importSelected.add(n):model.importSelected.delete(n);}});
  document.addEventListener('submit',e=>{if(e.target.id==='publishing-form'){e.preventDefault();$('#publishing-form [data-publishing="inspect"]')?.click();}});
- document.addEventListener('keydown',e=>{const b=e.target.closest('[role="tab"][data-publishing]');if(!b||!['ArrowLeft','ArrowRight','Home','End'].includes(e.key))return;e.preventDefault();model.tab=(e.key==='Home'||e.key==='ArrowLeft')?'drama':'slice';redraw();$('#publishing-tab-'+model.tab)?.focus();});
  document.addEventListener('click',async e=>{
   const b=e.target.closest('[data-publishing]');if(!b||model.busy)return;
   const action=b.dataset.publishing;
-  if(action==='tab'){model.tab=b.dataset.tab;redraw();return;}
   if(action==='locate'){locate(b.dataset.key);return;}
   model.busy=true;const old=b.innerHTML;b.disabled=true;
   try{

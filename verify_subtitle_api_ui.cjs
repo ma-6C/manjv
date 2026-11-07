@@ -1,0 +1,97 @@
+// Requires MANJU_SUBTITLE_FIXTURE=1 test_content_settings_host.py.
+// Local config, encoding, task execution and playable media are real; cloud replies are simulated.
+const {chromium}=require('C:/Users/yumda/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/node_modules/playwright');
+const fs=require('fs'),path=require('path'),assert=require('assert');
+const meta=JSON.parse(fs.readFileSync('tmp/content-settings-host.json','utf8')),checks=[];
+function check(name,value){assert(value,name);checks.push(name);console.log('PASS '+name);}
+const calls=()=>fs.readFileSync(path.join(meta.base,'calls.jsonl'),'utf8').trim().split('\n').map(JSON.parse);
+const submits=()=>calls().filter(c=>c.url.endsWith('/tasks/erase'));
+(async()=>{
+ const browser=await chromium.launch({headless:true,executablePath:'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe'});
+ try{
+  const page=await browser.newPage({viewport:{width:1540,height:1080}}),errors=[];let failSave=false;
+  page.on('pageerror',e=>errors.push(e.message));
+  await page.route('**/api/ai/connections',route=>{if(failSave){failSave=false;return route.fulfill({status:503,json:{error:'测试：字幕接口保存失败'}});}return route.continue();});
+  await page.goto(meta.launch+'#subtitle');await page.locator('.subtitle-settings-trigger').waitFor();
+  await page.locator('#subtitle-source').evaluate(video=>{window._subtitlePlayer=video;});
+  const before=await page.evaluate(()=>structuredClone(state.config));
+  await page.locator('.subtitle-settings-trigger').click();await page.locator('#subtitle-settings-tab-cloud').click();
+  const form=page.locator('#content-ai-panel-subtitle'),dialog=page.locator('#subtitle-settings-dialog');
+  check('subtitle_settings_have_independent_model_editor',await form.isVisible()&&await form.locator('#content-subtitle-model').count()===1);
+  check('existing_named_subtitle_connection_is_loaded',await page.locator('#content-subtitle-model').inputValue()==='old-subtitle');
+  await page.locator('#content-subtitle-choice').selectOption('legacy');
+  check('legacy_addresses_are_migrated_as_draft_paths',await page.locator('#content-subtitle-base').inputValue()==='https://subtitle.invalid'&&await page.locator('#content-subtitle-submitPath').inputValue()==='/clear'&&await page.locator('#content-subtitle-pollPath').inputValue()==='/status');
+  await page.locator('#content-subtitle-base').fill('https://subtitle.fixture.invalid');await page.locator('#content-subtitle-key').fill('fixture-subtitle-key');await page.locator('#content-subtitle-model').fill('');
+  await page.waitForFunction(()=>document.querySelector('#content-subtitle-model-choice').options.length===4);
+  check('subtitle_url_and_key_fetch_models_before_model_or_save',await page.locator('#content-subtitle-model').inputValue()==='');
+  check('catalogue_query_does_not_change_task_base',await page.locator('#content-subtitle-base').inputValue()==='https://subtitle.fixture.invalid'&&calls().some(c=>c.url==='https://subtitle.fixture.invalid/v1/models'));
+  check('catalogue_query_does_not_save_or_upload',JSON.stringify(before)===await page.evaluate(()=>JSON.stringify(state.config))&&submits().length===0);
+  check('list_success_does_not_claim_subtitle_processing',(await page.locator('#content-subtitle-models-status').textContent()).includes('不代表支持去字幕'));
+  await page.locator('#content-subtitle-model-search').fill('erase-alpha');await page.locator('#content-subtitle-model-choice').selectOption('erase-alpha');
+  check('subtitle_model_can_be_searched_and_selected',await page.locator('#content-subtitle-model').inputValue()==='erase-alpha');
+  await form.locator('summary').click();await page.locator('#content-subtitle-submitPath').fill('/tasks/erase');await page.locator('#content-subtitle-pollPath').fill('/tasks/status');
+  await page.locator('[data-action="subtitle-cloud-save"]').click();await page.waitForFunction(()=>document.querySelector('#content-subtitle-result').textContent.includes('已保存去字幕接口'));
+  check('sticky_footer_saves_subtitle_connection',await page.locator('[data-action="subtitle-cloud-save"]').isVisible());
+  const cid=await page.evaluate(()=>state.config.aiSelection.subtitle);
+  check('save_creates_and_selects_named_subtitle_connection',await page.evaluate(id=>state.config.aiConnections.some(c=>c.id===id&&c.channel==='subtitle'&&c.model==='erase-alpha'&&c.base==='https://subtitle.fixture.invalid'&&c.submitPath==='/tasks/erase'),cid));
+  check('new_connection_can_be_edited_again',await page.locator('#content-subtitle-name').inputValue()==='云端去字幕');
+  check('subtitle_key_is_cleared_from_form_after_save',await page.locator('#content-subtitle-key').inputValue()==='');
+  const after=await page.evaluate(()=>structuredClone(state.config));
+  check('subtitle_save_preserves_text_image_and_local_engine',JSON.stringify(before.aiConnections.filter(c=>c.channel!=='subtitle'))===JSON.stringify(after.aiConnections.filter(c=>c.channel!=='subtitle'))&&['apiBase','textModel','imageApiBase','imageModel','vsrMode','vsrRoot','vsrPython','subtitleMode','subtitleEndpoint','subtitlePoll'].every(key=>before[key]===after[key]));
+  await form.locator('[data-action="content-ai-test"]').click();await page.waitForFunction(()=>document.querySelector('#content-subtitle-result').textContent.includes('尚未上传视频'));
+  check('subtitle_connection_test_queries_models_without_upload',submits().length===0&&(await page.locator('#content-subtitle-result').textContent()).includes('3 个'));
+  await page.locator('#subtitle-settings-tab-local').click();await page.locator('#subtitle-settings-tab-cloud').click();await page.evaluate(()=>poll());
+  check('tab_switch_and_poll_preserve_subtitle_form',await dialog.isVisible()&&await page.locator('#content-subtitle-model').inputValue()==='erase-alpha');
+  await page.screenshot({path:path.join(meta.base,'云端去字幕-模型配置-桌面.png')});
+  await page.locator('#subtitle-settings-tab-production').click();await page.locator('#config-subtitleMode').selectOption('cloud');await page.waitForFunction(()=>state.config.subtitleMode==='cloud');
+  check('cloud_mode_can_be_selected_without_recreating_player',await page.locator('#subtitle-source').evaluate(video=>video===window._subtitlePlayer));
+  await page.keyboard.press('Escape');
+  await page.waitForFunction(()=>Number.isFinite(document.querySelector('#subtitle-source').duration));
+  await page.locator('[data-action="subtitle-preview"][data-seconds="5"]').click();
+  await page.waitForFunction(()=>state.jobs.some(j=>j.kind==='preview'&&['running','completed'].includes(j.status)));
+  // Change saved settings while the job is running; the queued snapshot must keep alpha.
+  await page.evaluate(async id=>{const c=state.config.aiConnections.find(c=>c.id===id);await api('ai/connections',{connection:{...c,model:'erase-beta'}});await refresh();},cid);
+  await page.waitForFunction(()=>state.jobs.some(j=>j.kind==='preview'&&j.status==='completed'),{},{timeout:45000});
+  await page.waitForFunction(()=>document.querySelector('#preview-after')?.readyState>=1,{},{timeout:15000});
+  const preview=await page.evaluate(()=>state.jobs.filter(j=>j.kind==='preview').at(-1));
+  const savedJob=JSON.parse(fs.readFileSync(path.join(meta.base,'data/jobs.json'),'utf8')).find(j=>j.id===preview.id);
+  check('five_second_preview_upload_uses_selected_snapshot_model',submits().length===1&&submits()[0].model==='erase-alpha'&&savedJob.config.aiConnections.find(c=>c.id===cid).model==='erase-alpha');
+  check('async_subtitle_query_uses_configured_poll_path',calls().some(c=>c.url==='https://subtitle.fixture.invalid/tasks/status'));
+  check('subtitle_model_query_did_not_prefix_upload_with_v1',submits()[0].url==='https://subtitle.fixture.invalid/tasks/erase');
+  check('downloaded_preview_is_playable_five_second_video',await page.locator('#preview-after').evaluate(v=>v.duration>=4.8&&v.duration<=5.3&&v.videoWidth===320));
+  await page.locator('[data-action="subtitle-full"][data-scope="current"]').click();
+  await page.waitForFunction(()=>state.jobs.some(j=>j.kind==='subtitle'&&j.status==='completed'),{},{timeout:45000});
+  check('full_episode_uses_newly_saved_model',submits().length===2&&submits()[1].model==='erase-beta');
+  check('each_async_task_is_uploaded_once',submits().length===2);
+
+  await page.locator('.subtitle-settings-trigger').click();await page.locator('#subtitle-settings-tab-cloud').click();
+  await page.locator('#content-subtitle-model').fill('');await form.locator('[data-action="content-ai-save"]').click();await page.waitForFunction(()=>document.querySelector('#content-subtitle-result').textContent.includes('已保存去字幕接口'));
+  check('adapter_without_model_parameter_can_still_be_saved',await page.evaluate(id=>state.config.aiConnections.find(c=>c.id===id).model==='',cid));
+  await page.locator('#content-subtitle-model').fill('erase-alpha');failSave=true;await form.locator('[data-action="content-ai-save"]').click();
+  await page.waitForFunction(()=>document.querySelector('#content-subtitle-result').textContent.includes('保存失败'));
+  check('failed_subtitle_save_keeps_input_and_dialog',await dialog.isVisible()&&await page.locator('#content-subtitle-model').inputValue()==='erase-alpha');
+  await form.locator('[data-action="content-ai-save"]').click();await page.waitForFunction(()=>document.querySelector('#content-subtitle-result').textContent.includes('已保存去字幕接口'));
+  await page.locator('#content-subtitle-key').fill('fixture-invalid');await page.waitForFunction(()=>document.querySelector('#content-subtitle-models-status').textContent.includes('401'));
+  check('subtitle_invalid_key_has_clear_error',(await page.locator('#content-subtitle-models-status').textContent()).includes('密钥无效')&&!await page.locator('#content-subtitle-model-picker').isVisible());
+  await page.locator('#content-subtitle-key').fill('fixture-subtitle-key');await page.waitForFunction(()=>!document.querySelector('#content-subtitle-model-picker').hidden);
+  check('subtitle_corrected_key_automatically_recovers',(await page.locator('#content-subtitle-models-status').textContent()).includes('3 个'));
+  await page.setViewportSize({width:390,height:900});await page.locator('#content-subtitle-base').scrollIntoViewIfNeeded();
+  check('subtitle_mobile_editor_has_no_horizontal_overflow',await dialog.evaluate(e=>e.scrollWidth<=e.clientWidth+1)&&await form.evaluate(e=>e.scrollWidth<=e.clientWidth+1));
+  await page.screenshot({path:path.join(meta.base,'云端去字幕-模型配置-手机.png')});
+  await form.locator('[data-action="content-ai-clear"]').click();await page.waitForFunction(()=>document.querySelector('#content-subtitle-result').textContent.includes('已清除'));
+  check('subtitle_clear_key_updates_session_status',(await page.locator('#content-subtitle-key-status').textContent()).includes('尚未设置'));
+  await form.locator('[data-action="content-ai-models"]').click();await page.waitForFunction(()=>document.querySelector('#content-subtitle-models-status').textContent.includes('请先填写'));
+  check('subtitle_missing_key_has_actionable_message',(await page.locator('#content-subtitle-models-status').textContent()).includes('密钥'));
+  await page.locator('#content-subtitle-key').fill('fixture-close-secret');await page.keyboard.press('Escape');
+  check('closing_subtitle_settings_clears_draft_key',await page.locator('#content-subtitle-key').inputValue()==='');
+  const persisted=fs.readFileSync(path.join(meta.base,'data/state.json'),'utf8')+fs.readFileSync(path.join(meta.base,'data/jobs.json'),'utf8');
+  check('subtitle_credentials_not_in_config_or_job_snapshots',!['fixture-subtitle-key','fixture-invalid','fixture-close-secret'].some(key=>persisted.includes(key)));
+  await page.reload();await page.locator('.subtitle-settings-trigger').click();await page.locator('#subtitle-settings-tab-cloud').click();
+  check('subtitle_connection_model_and_paths_persist_after_reload',await page.locator('#content-subtitle-model').inputValue()==='erase-alpha'&&await page.locator('#content-subtitle-submitPath').inputValue()==='/tasks/erase');
+  await page.keyboard.press('Escape');await page.evaluate(()=>location.hash='text');await page.locator('.content-ai-trigger').click();
+  check('content_settings_have_api_and_storage_tabs_without_subtitle_form',await page.locator('#content-ai-settings [role="tab"]').count()===3&&await page.locator('#content-ai-panel-subtitle').count()===0);
+  check('no_browser_runtime_errors',errors.length===0);
+  fs.writeFileSync(path.join(meta.base,'subtitle-api-report.json'),JSON.stringify({ok:true,checks,errors,cloudResponses:'simulated',realLocalSampleAndPlayback:true},null,2));
+  console.log(JSON.stringify({ok:true,passed:checks.length,base:meta.base}));
+ }finally{await browser.close();}
+})().catch(error=>{console.error(error);process.exitCode=1;});

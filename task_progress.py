@@ -71,6 +71,19 @@ def failure(job,error,redact=safe_text,trace=''):
         code,action='PROCESS_TIMEOUT','当前外部程序超过等待上限。核对原始输出和运行环境后重试当前步骤。'
     if code=='CUDA_COMPATIBILITY' and job.get('kind')=='jianying_project':
         action='在工程图的本页设置中将 AI 推理设备改为 CPU，或安装支持当前显卡架构的 PyTorch/CUDA 引擎；仅替换 cuBLAS/cuDNN 不能补齐显卡内核。'
+    engine=job.get('options',{}).get('studio',{}).get('engine','local')
+    if job.get('kind')=='promotion_auto' and engine=='mediakit':
+        if code=='AUTH' or 'mediakit http 401' in text or 'mediakit http 403' in text:
+            code,action='AUTH','在推广挂载右上角“本页设置 → 火山云端”核对 MediaKit API Key、服务权限和余额；它与普通文字模型接口分开配置。'
+        elif '结果未知' in text:
+            action='保留当前任务，按原始报错中的请求凭证到火山控制台核对是否已经创建；不要重复提交以免重复计费。'
+        elif code in ('NETWORK','PROCESS_TIMEOUT'):
+            action='检查网络后继续原任务；软件会优先查询已保存的云端任务编号，已提交任务可能仍在云端运行。'
+    elif job.get('kind')=='promotion_auto' and job.get('options',{}).get('localBackend')=='dramaclip':
+        if code=='DEPENDENCY':
+            action='到推广挂载右上角“本页设置 → 本地引擎”查看缺少的组件和 Python 路径，修复后继续原任务。'
+        elif code=='AUTH':
+            action='本地剧情规划调用当前文字 AI 连接；检查文字接口的密钥、模型权限和余额后继续原任务。'
     summary={'CUDA_COMPATIBILITY':'当前显卡与 AI 引擎的 PyTorch/CUDA 不兼容。','CUDA_LIBRARIES':'所选 GPU 运行库缺失或与 AI 引擎不兼容。','DISK_SPACE':'输出磁盘空间不足。','MEMORY':'处理引擎报告内存或显存不足。','FILE_MISSING':'处理所需的文件或目录不存在。',
         'PERMISSION':'处理程序没有文件访问权限。','DEPENDENCY':'引擎缺少模块或运行库。','AUTH':'接口认证未通过。',
         'FILTER':'媒体滤镜未能初始化。','ENCODER':'视频编码器未能正常启动。','PARAMETER':'媒体命令中的参数未被接受。','NETWORK':'连接或服务响应异常。',

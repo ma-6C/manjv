@@ -87,19 +87,21 @@ class Tests(unittest.TestCase):
             self.assertEqual(result['status'], 'waiting_action')
             self.assertFalse(result['projectOpened'])
 
-    def test_unique_home_native_action_then_verified_editor(self):
+    def test_home_waits_for_manual_open_even_with_unique_card(self):
         fake = Fake([HOME, OPEN])
         result = self.run_flow(fake, timeout=1)
-        self.assertEqual(result['status'], 'completed')
-        self.assertEqual(fake.actions, 1)
+        self.assertEqual(result['reason'], 'editor_manual_open')
+        self.assertEqual(fake.actions, 0)
         self.assertEqual(fake.launches, 0)
+        fake.snapshots=[OPEN]
+        self.assertEqual(self.run_flow(fake)['status'],'completed')
 
-    def test_first_draft_opens_without_per_card_accessibility(self):
+    def test_legacy_mouse_option_never_clicks_first_draft(self):
         fake=FirstDraftFake([{**HOME,'targetCount':0},OPEN])
         with patch.object(module.jianying_registry,'first_draft',return_value=True):
             result=module.open_registered_project(self.result,{'mouseOpen':True},backend=fake,wait_timeout=1)
-        self.assertEqual(result['status'],'completed')
-        self.assertEqual(fake.first_actions,1)
+        self.assertEqual(result['reason'],'editor_manual_open')
+        self.assertEqual(fake.first_actions,0)
         self.assertEqual(fake.actions,0)
 
     def test_first_draft_gate_prevents_opening_another_card(self):
@@ -109,14 +111,14 @@ class Tests(unittest.TestCase):
         self.assertEqual(result['status'],'waiting_action')
         self.assertEqual(fake.first_actions,0)
 
-    def test_idle_home_exits_before_index_registration(self):
+    def test_home_is_not_closed_or_reordered_for_manual_open(self):
         fake=FirstDraftFake([HOME,{**HOME,'targetCount':0},OPEN])
         order=[]
         fake.close_home=lambda *args:order.append('close_home') or True
         with patch.object(module,'NativeBackend',return_value=fake),patch.object(module.jianying_registry,'first_draft',return_value=True),patch.object(module.jianying_registry,'register',side_effect=lambda *args:order.append('register') or {}):
             result=module.open_registered_project(self.result,{'mouseOpen':True},wait_timeout=1)
-        self.assertEqual(result['status'],'completed')
-        self.assertEqual(order,['close_home','register'])
+        self.assertEqual(result['reason'],'editor_manual_open')
+        self.assertEqual(order,[])
 
     def test_other_editor_never_closes_or_registers(self):
         fake=FirstDraftFake([{'mode':'other_editor'}])
@@ -134,12 +136,12 @@ class Tests(unittest.TestCase):
         register.assert_not_called()
         self.assertEqual(fake.first_actions,0)
 
-    def test_first_draft_click_unknown_outcome_is_not_repeated(self):
+    def test_old_first_card_backend_is_never_invoked(self):
         fake=FirstDraftFake([{**HOME,'targetCount':0},HOME,OPEN],raises=True)
         with patch.object(module.jianying_registry,'first_draft',return_value=True):
             result=module.open_registered_project(self.result,{'mouseOpen':True},backend=fake,wait_timeout=1)
-        self.assertEqual(result['status'],'completed')
-        self.assertEqual(fake.first_actions,1)
+        self.assertEqual(result['reason'],'editor_manual_open')
+        self.assertEqual(fake.first_actions,0)
 
     def test_index_first_draft_requires_path_name_and_id(self):
         folder=self.folder/'draft';folder.mkdir()
@@ -158,8 +160,8 @@ class Tests(unittest.TestCase):
     def test_unknown_action_outcome_observes_without_retry(self):
         fake = Fake([HOME, HOME, OPEN], raises=True)
         result = self.run_flow(fake, timeout=1)
-        self.assertEqual(result['status'], 'completed')
-        self.assertEqual(fake.actions, 1)
+        self.assertEqual(result['reason'], 'editor_manual_open')
+        self.assertEqual(fake.actions, 0)
 
     def test_native_reassigned_id_requires_metadata_name_path_and_id_agreement(self):
         folder=self.folder/'draft';folder.mkdir()
@@ -196,7 +198,7 @@ class Tests(unittest.TestCase):
     def test_no_callable_native_action_waits(self):
         fake = Fake([HOME], invokes=False)
         self.assertEqual(self.run_flow(fake)['status'], 'waiting_action')
-        self.assertEqual(fake.actions, 1)
+        self.assertEqual(fake.actions, 0)
 
     def test_invalid_signature_never_launches(self):
         self.editor['editorSignatureVerified'] = False

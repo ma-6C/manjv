@@ -21,15 +21,17 @@ function pipelineActivitySteps(job=null){
  return steps;
 }
 function productionPlanItemsHTML(){return pipelineActivitySteps().map(([title,desc])=>`<li><strong>${esc(title)}</strong><span>${esc(desc)}</span></li>`).join('');}
-function productionRunHTML(){return card('运行当前剧集','film',picker()+`<div class="production-run-actions">${jobButton('pipeline','开始连续制作')}${jobButton('transcode','仅合并切分',false)}</div><p id="production-run-summary" class="field-hint">本次将执行：${pipelineActivitySteps().map(s=>esc(s[0])).join(' → ')}</p><p class="field-hint">连续制作会自动执行下方已开启的步骤；仅合并切分会在分集保存后结束。</p><div id="production-handoff">${productionHandoffHTML()}</div>`);}
+function productionAdvancedHTML(){return `<details id="scan-advanced-processing" class="production-advanced" ${advancedProcessingOpen?'open':''}><summary>高级处理<span>合并与重新分集 · 批量连续制作</span></summary><div class="production-advanced-body">${productionRegroupHTML()}${productionSetupHTML()}${productionRunHTML()}</div></details>`;}
+function productionRegroupHTML(){return card('合并与重新分集','layers',toggle('启用整剧重组','regroup','将同一部剧的全部源视频按集数合并，再按设定时长切分；关闭后保持原分集。')+'<hr>'+`<div class="grid-2">${field('切分时长（秒）','segmentSeconds',{type:'number',min:1,max:3600})}${field('输出宽度（像素）','width',{type:'number',min:64,max:3840,step:2})}${field('输出高度（像素）','height',{type:'number',min:64,max:3840,step:2})}</div><div class="preset-row"><button class="preset" data-preset="vertical">竖屏 1080 × 1920</button><button class="preset" data-preset="landscape">横屏 1920 × 1080</button><button class="preset" data-preset="source">沿用首个源视频尺寸</button></div><div class="timeline-preview">${Array.from({length:5},(_,i)=>`<div class="timeline-block">${i<4?state.config.segmentSeconds+'s':'余片'}</div>`).join('')}</div><p class="field-hint">时间线示意。最后一集保留剩余时长；合并时统一尺寸和音轨，无音频素材自动补静音。</p>`+saveFooter());}
+function productionRunHTML(){return card('连续制作与批量操作','film',picker()+`<div class="production-run-actions">${jobButton('pipeline','制作当前剧集')}${jobButton('transcode','仅合并切分当前剧集',false)}</div><p id="production-run-summary" class="field-hint">本次将执行：${pipelineActivitySteps().map(s=>esc(s[0])).join(' → ')}</p><p class="field-hint">连续制作会自动执行下方已开启的步骤；仅合并切分会在分集保存后结束。</p><div class="production-batch-actions"><p id="production-batch-count" class="field-hint">${selected.size?`已勾选 ${selected.size} 部剧集，按勾选顺序制作。`:'先在上方素材库勾选要批量制作的剧集。'}</p><button class="button" data-action="pipeline" data-production-batch ${selected.size?'':'disabled'}>${icon('layers')}批量制作已勾选剧集</button></div><div id="production-handoff">${productionHandoffHTML()}</div>`);}
 function productionSetupHTML(){
  return card('连续制作步骤','layers',`<p class="section-description">开始后按以下顺序自动执行已开启的步骤，合并切分完成后继续后续任务。</p><ol id="production-config-plan" class="production-plan" aria-label="连续制作顺序">${productionPlanItemsHTML()}</ol><div class="production-options">`+
  toggle('先修复字幕','subtitleAuto','使用 AI 去字幕页配置的模式和选区，处理全部所选视频后再合并。')+
  toggle('AI 剧名与简介','autoText','使用已选择的文字接口；缺少配置时在开始前提示。')+
  toggle('合并后生成高光包装','pipelineHighlight','直接使用本次分集结果继续包装。')+
- toggle('自动制作封面','autoCover','使用本地排版；生图方式沿用 AI 接口页的封面配置。')+
+ toggle('自动制作封面','autoCover','使用本地排版；生图方式使用文案与封面页的封面接口配置。')+
  toggle('保存实际制作记录','autoRecords','记录实际文件与处理结果，不绘制工程界面。官方截图在剪映工程页采集。')+
- toggle('生成成本报告','autoCost','按成本报告页填写的实际金额生成。')+`</div><p class="field-hint">字幕选区在 <a href="#subtitle">AI 去字幕</a> 调整，文案接口在 <a href="#api">AI 接口</a> 配置。完成所选步骤后可核对发布材料。</p>`);
+ toggle('生成成本报告','autoCost','按成本报告页填写的实际金额生成。')+`</div><p class="field-hint">字幕选区在 <a href="#subtitle">AI 去字幕</a> 调整，文案和封面接口在 <a href="#text">文案与封面</a> 右上角的设置中配置。完成所选步骤后可核对发布材料。</p>`);
 }
 function productionContinuationButton(job){
  if(job?.kind!=='transcode'||job.status!=='completed')return '';
@@ -44,15 +46,34 @@ function productionHandoffHTML(){
 }
 
 let subtitleSettingsTab='production',subtitleSettingsTrigger=null;
-const subtitleSettingSections=[['production','完整制作设置','layers'],['local','本地 AI 引擎','cpu'],['cloud','云端服务连接','link']];
+const subtitleSettingSections=[['production','完整制作设置','layers'],['local','本地 AI 引擎','cpu'],['cloud','云端服务连接','link'],['storage','存储位置','folder']];
 function subtitleSettingsOpen(){return !!$('#subtitle-settings-dialog')?.open;}
+function subtitleStorageHTML(){
+ return card('存储位置','folder',`<div class="field"><label for="subtitle-storage-output">去字幕文件保存位置</label><div class="path-field"><input id="subtitle-storage-output" value="${esc(state.config.output)}" spellcheck="false"><button type="button" class="button" data-action="subtitle-storage-pick">${icon('folder')}选择文件夹</button></div><p class="field-hint">去字幕视频保存在这个文件夹下的剧集目录中，按处理方式分文件夹保存。这里与软件的文案、封面及处理视频共用保存位置。</p><p class="field-hint">点击底部「保存存储位置」后检查写入权限并记住位置。用于后续新任务；已排队任务保留原位置，已有文件保留在原处。</p></div><p id="subtitle-storage-result" class="content-ai-result" role="status" aria-live="polite"></p>`);
+}
+async function saveSubtitleStorage(){
+ const input=$('#subtitle-storage-output'),value=input.value.trim(),button=$('[data-action="subtitle-storage-save"]'),picker=$('[data-action="subtitle-storage-pick"]'),result=$('#subtitle-storage-result');
+ if(button?.disabled)return;input.disabled=true;if(button)button.disabled=true;if(picker)picker.disabled=true;
+ result.textContent='正在检查文件夹写入权限…';result.classList.remove('error');subtitleSettingsSaveState('saving');
+ try{
+  saving=saving.catch(()=>{}).then(async()=>{const saved=await api('storage/settings',{output:value});state.config=saved.config;state.jianyingOptions=saved.options;if(typeof jianyingOptions!=='undefined')jianyingOptions=null;input.value=saved.config.output;});
+  await saving;result.textContent='存储位置已保存，后续新任务使用此文件夹。';subtitleSettingsSaveState('saved');
+ }catch(error){result.textContent=error.message;result.classList.add('error');subtitleSettingsSaveState('failed',error.message);}
+ finally{input.disabled=false;if(button)button.disabled=false;if(picker)picker.disabled=false;}
+}
+document.addEventListener('input',event=>{if(event.target.id==='subtitle-storage-output'){const result=$('#subtitle-storage-result');result.textContent='';result.classList.remove('error');subtitleSettingsSaveState('dirty');}});
+function subtitleTailHTML(){
+ if(state.config.subtitleMode!=='vsr'||!['sttn-auto','lama-box','lama-text'].includes(state.config.vsrMode))return '';
+ return field('保留每集片尾原画（秒）','subtitlePreserveTailSeconds',{type:'number',min:0,max:30,step:.1,hint:'最后这些秒数跳过字幕修复，保留片尾卡片。0 为处理到末帧。短片试处理按原片时间对应。'});
+}
 function subtitleSettingsHTML(){
  const panels=[
 card('完整制作设置','layers',field('字幕处理方式','subtitleMode',{options:[['vsr','本地 AI · VSR'],['local','本地区域修补 · delogo'],['cloud','云端 AI 适配器']]})+
    '<div id="subtitle-settings-mode-note">'+alert(state.config.subtitleMode==='local'?'区域修补用周围像素填充，复杂背景可能变平滑。请先检查试处理效果。':state.config.subtitleMode==='vsr'?'本地神经网络修复使用已安装的 VSR 引擎，无需云端密钥。':'云端需要配置服务适配器；当前契约只支持一个字幕选区。')+'</div>'+
    toggle('完整流水线先去字幕','subtitleAuto','开启后，全部源视频先去字幕，再调色、变速、合并与分集；最终分集用于包装、材料包和上传。')+
-   '<p class="field-hint">上方「当前整集」处理源视频下拉框选中的完整视频；「整剧连续」处理当前剧集的全部已导入视频。自由选集可从红果素材页发起「仅去字幕 · 全部所选集」。</p>'),card('本地 AI 引擎','cpu',field('VSR 项目目录','vsrRoot',{browse:true})+field('引擎 Python','vsrPython',{browse:true})+field('本地修复引擎','vsrMode',{options:[['sttn-auto','STTN · 时序视频修复'],['lama-box','LaMa · 框选区域逐帧修复'],['sttn-det','STTN · 原检测流程（需额外依赖）'],['lama','LaMa · 原检测流程（需额外依赖）'],['propainter','ProPainter · 原检测流程（需额外依赖）']],hint:'STTN 与 LaMa 框选模式是两条独立本地修复路线；新任务使用当前选择，已排队任务保留原选择。'})+field('STTN 推理设备','sttnDevice',{options:[['auto','自动：优先 GPU，不兼容时回退 CPU'],['cpu','CPU']],hint:'仅作用于 STTN 时序修复。CPU 耗时会增加；与视频编码 GPU 开关独立。'})+field('LaMa 推理设备','lamaDevice',{options:[['auto','自动：优先 GPU，失败回退 CPU'],['cpu','CPU']],hint:'仅作用于 LaMa 框选修复；与视频编码 GPU 开关独立。'})+toggle('批量复用 AI 模型','vsrReuseWorker','STTN 时序修复与 LaMa 框选修复连续多集复用各自模型，空闲2分钟释放。切换引擎会释放上一套模型；关闭后每集重新启动。')+'<p class="field-hint">STTN 结合前后帧修复；LaMa 按帧修补选区，动态背景可能闪烁，建议先对同一段试处理比较。LaMa 框选路线为独立开源适配，不代表已还原超人助手的本地修复算法。</p>'),card('云端服务连接','link',field('字幕适配器 HTTPS 地址','subtitleEndpoint',{placeholder:'https://你的服务/video/clear'})+field('异步任务轮询地址','subtitlePoll',{placeholder:'https://你的服务/video/status'})+`<div class="field"><label for="subtitle-key">字幕服务密钥</label><input id="subtitle-key" type="password" autocomplete="off" placeholder="仅在本次服务进程中保存"></div><button class="button" data-action="save-subtitle-key">设置本次会话密钥</button><p class="field-hint">POST {video_base64, filename, region}；同步响应 {status, video_url}，异步响应 {task_id, status}。文件上限 80MB。</p>`)
+   '<p class="field-hint">上方「当前整集」处理源视频下拉框选中的完整视频；「整剧连续」处理当前剧集的全部已导入视频。自由选集可从红果素材页发起「仅去字幕 · 全部所选集」。</p>'),card('本地 AI 引擎','cpu',field('VSR 项目目录','vsrRoot',{browse:true})+field('引擎 Python','vsrPython',{browse:true})+field('本地修复引擎','vsrMode',{options:[['sttn-auto','STTN · 时序视频修复'],['lama-box','LaMa · 框选区域逐帧修复'],['lama-text','LaMa · 白字轮廓精修'],['sttn-det','STTN · 原检测流程（需额外依赖）'],['lama','LaMa · 原检测流程（需额外依赖）'],['propainter','ProPainter · 原检测流程（需额外依赖）']],hint:'白字轮廓精修适合带深色描边的白色字幕压住人脸时使用。请先框住字幕，试处理 5 秒检查残字。'})+field('STTN 推理设备','sttnDevice',{options:[['auto','自动：优先 GPU，不兼容时回退 CPU'],['cpu','CPU']],hint:'仅作用于 STTN 时序修复。CPU 耗时会增加；与视频编码 GPU 开关独立。'})+field('LaMa 推理设备','lamaDevice',{options:[['auto','自动：优先 GPU，失败回退 CPU'],['cpu','CPU']],hint:'用于 LaMa 框选和白字轮廓修复。推理设备与视频编码设置独立。'})+'<div id="subtitle-tail-setting">'+subtitleTailHTML()+'</div>'+toggle('批量复用 AI 模型','vsrReuseWorker','STTN 和 LaMa 连续多集复用各自模型，空闲 2 分钟释放。切换引擎会释放上一套模型；关闭后每集重新启动。')+'<p class="field-hint">STTN 结合前后帧修复；LaMa 按帧修补选区，动态背景可能闪烁，建议先对同一段试处理比较。LaMa 框选路线为独立开源适配，不代表已还原超人助手的本地修复算法。</p>'),card('云端服务连接','link',subtitleCloudConnectionHTML())
  ];
+ panels.push(subtitleStorageHTML());
  return `<dialog id="subtitle-settings-dialog" class="subtitle-settings-dialog" aria-labelledby="subtitle-settings-title"><header class="subtitle-settings-header"><div><h2 id="subtitle-settings-title">AI 去字幕设置</h2><p>选择左侧项目，调整本页面的制作参数。</p></div><button type="button" class="icon-button" data-action="subtitle-settings-close" aria-label="关闭字幕设置">×</button></header><div class="subtitle-settings-layout"><nav class="subtitle-settings-nav" role="tablist" aria-label="字幕设置分类" aria-orientation="vertical">${subtitleSettingSections.map(([key,label,ico])=>`<button type="button" id="subtitle-settings-tab-${key}" role="tab" aria-controls="subtitle-settings-panel-${key}" aria-selected="${subtitleSettingsTab===key}" tabindex="${subtitleSettingsTab===key?0:-1}" data-action="subtitle-settings-tab" data-tab="${key}">${icon(ico)}<span>${label}</span></button>`).join('')}</nav><div class="subtitle-settings-panels">${subtitleSettingSections.map(([key],i)=>`<section id="subtitle-settings-panel-${key}" role="tabpanel" aria-labelledby="subtitle-settings-tab-${key}" ${subtitleSettingsTab===key?'':'hidden'}>${panels[i]}</section>`).join('')}</div></div><footer class="subtitle-settings-footer"><span id="subtitle-settings-save-state" role="status">修改后自动保存到本机</span><div class="actions-row"><button class="button" data-action="save-config">${icon('save')}保存设置</button><button class="button primary" data-action="subtitle-settings-close">完成</button></div></footer></dialog>`;
 }
 function selectSubtitleSettingsTab(key,focus=false){
@@ -60,15 +81,20 @@ function selectSubtitleSettingsTab(key,focus=false){
  subtitleSettingsTab=key;
  subtitleSettingSections.forEach(([id])=>{const tab=$('#subtitle-settings-tab-'+id),panel=$('#subtitle-settings-panel-'+id);if(tab){tab.setAttribute('aria-selected',String(id===key));tab.tabIndex=id===key?0:-1;}if(panel)panel.hidden=id!==key;});
  if(focus)$('#subtitle-settings-tab-'+key)?.focus();
+ const saveButton=$('.subtitle-settings-footer .actions-row .button');if(saveButton){saveButton.dataset.action=key==='cloud'?'subtitle-cloud-save':key==='storage'?'subtitle-storage-save':'save-config';saveButton.dataset.channel='subtitle';saveButton.innerHTML=icon('save')+(key==='cloud'?'保存去字幕接口':key==='storage'?'保存存储位置':'保存设置');}
+ const panels=$('.subtitle-settings-panels');if(panels)panels.scrollTop=0;
+ if(key==='cloud'){subtitleSettingsSaveState('saved');scheduleContentAIModels('subtitle');}
+ else subtitleSettingsSaveState('saved');
 }
 function subtitleSettingsSaveState(status,message=''){
- const el=$('#subtitle-settings-save-state');if(el){el.textContent=status==='saving'?'保存中…':status==='failed'?'保存失败：'+message:'已保存到本机';el.classList.toggle('failed',status==='failed');}
+ const el=$('#subtitle-settings-save-state');if(el){el.textContent=status==='failed'?'保存失败：'+message:status==='saving'?'保存中…':subtitleSettingsTab==='cloud'?'云端接口修改后，请点击「保存去字幕接口」':subtitleSettingsTab==='storage'?($('#subtitle-storage-output')?.value.trim()===state.config.output?'存储位置已保存到本机':'目录尚未保存，请点击「保存存储位置」'):'已保存到本机';el.classList.toggle('failed',status==='failed');}
 }
 function updateSubtitleSettingsControls(patch={}){
  if(current!=='subtitle')return;
  for(const key of Object.keys(patch)){const el=$('#subtitle-settings-dialog [data-config="'+key+'"]');if(el){if(el.type==='checkbox')el.checked=!!state.config[key];else el.value=state.config[key]??'';}}
  const note=$('#subtitle-settings-mode-note');if(note)note.innerHTML=alert(state.config.subtitleMode==='local'?'区域修补用周围像素填充，复杂背景可能变平滑。请先检查试处理效果。':state.config.subtitleMode==='vsr'?'本地神经网络修复使用已安装的 VSR 引擎，无需云端密钥。':'云端需要配置服务适配器；当前契约只支持一个字幕选区。');
  const scope=$('#subtitle-full-scope');if(scope)scope.textContent=subtitleScopeSummary();
+ const tail=$('#subtitle-tail-setting');if(tail&&('subtitleMode' in patch||'vsrMode' in patch))tail.innerHTML=subtitleTailHTML();
  subtitleSettingsSaveState('saved');
 }
 function subtitleScopeSummary(){const p=activeProject(),v=studioVideo();return (v?`当前整集：${v.name} · ${timecode(v.duration)}；整剧：${p.videos.length} 集 · 合计 ${duration(p.videos.reduce((sum,item)=>sum+item.duration,0))}。`:'先导入素材，再选择要处理的剧集。')+'当前方式：'+(({vsr:'本地 AI 修复',local:'本地区域修补',cloud:'云端 AI 适配器'})[state.config.subtitleMode]||'未选择')+'。';}
@@ -165,14 +191,14 @@ function updateStudioProxy(){
 function updatePreviewResult(force=false){
  const target=$('#subtitle-preview-result');if(!target)return;
  const p=activeProject(),job=state.jobs.filter(j=>j.kind==='preview'&&j.ids.includes(p?.id)&&j.options?.videoIndex===studioIndex).at(-1);
- const signature=JSON.stringify([job?.id,job?.status,job?.error,job?.result,regions(),state.config.subtitleMode,state.config.vsrMode]);
+ const signature=JSON.stringify([job?.id,job?.status,job?.error,job?.result,regions(),state.config.subtitleMode,state.config.vsrMode,state.config.subtitlePreserveTailSeconds||0]);
  if(!force&&signature===previewSignature)return;previewSignature=signature;
  if(!job){target.innerHTML='<p class="field-hint">试处理完成后会在这里显示原片与处理结果。</p>';return;}
  if(job.status!=='completed'){
   target.innerHTML=`<div class="preview-wait"><strong>${statusLabels[job.status]||job.status}</strong><span>${esc(job.error||job.stage)}</span><a href="#logs">查看任务</a></div>`;return;
  }
- const result=job.result,stale=JSON.stringify(result.regions)!==JSON.stringify(regions())||result.mode!==state.config.subtitleMode||(result.mode==='vsr'&&(!result.engine||result.engine!==state.config.vsrMode));
- target.innerHTML=`<div class="preview-summary"><strong>试处理完成</strong><span>${timecode(result.start)} 起 · ${result.seconds.toFixed(2)} 秒</span>${stale?'<b>选区、模式或修复引擎已改变，请重新试处理</b>':''}</div><div class="preview-pair"><div><span>处理前 · 原片</span><video id="preview-before" src="${media(result.before)}" controls preload="metadata" playsinline></video></div><div><span>处理后 · ${result.mode==='vsr'?esc(result.engine==='lama-box'?'LaMa 逐帧修复':result.engine==='sttn-auto'?'STTN 时序修复':result.engine||'历史本地 AI（引擎未记录）'):result.mode==='local'?'区域修补':'云端 AI'}</span><video id="preview-after" src="${media(result.after)}" preload="metadata" muted playsinline></video></div></div><p class="field-hint">用左侧播放器控制两侧播放和拖动；声音来自左侧原片。</p><div class="actions-row"><button class="button small" data-action="play-output" data-path="${esc(result.after)}">${icon('play')}单独查看处理结果</button><a href="${media(result.after)}&download=1">下载试处理视频</a></div>`;
+ const result=job.result,stale=JSON.stringify(result.regions)!==JSON.stringify(regions())||result.mode!==state.config.subtitleMode||(result.mode==='vsr'&&(!result.engine||result.engine!==state.config.vsrMode))||(result.configuredPreserveTailSeconds||0)!==(state.config.subtitlePreserveTailSeconds||0);
+ target.innerHTML=`<div class="preview-summary"><strong>试处理完成</strong><span>${timecode(result.start)} 起 · ${result.seconds.toFixed(2)} 秒</span>${stale?'<b>选区、模式、修复引擎或片尾保留已改变，请重新试处理</b>':''}${result.engine==='lama-text'&&result.inferredFrames===0?'<b>本段未匹配到深色描边白字，已保留原画</b>':''}</div><div class="preview-pair"><div><span>处理前 · 原片</span><video id="preview-before" src="${media(result.before)}" controls preload="metadata" playsinline></video></div><div><span>处理后 · ${result.mode==='vsr'?esc(result.engine==='lama-text'?'LaMa 白字轮廓精修':result.engine==='lama-box'?'LaMa 逐帧修复':result.engine==='sttn-auto'?'STTN 时序修复':result.engine||'历史本地 AI（引擎未记录）'):result.mode==='local'?'区域修补':'云端 AI'}</span><video id="preview-after" src="${media(result.after)}" preload="metadata" muted playsinline></video></div></div><p class="field-hint">用左侧播放器控制两侧播放和拖动；声音来自左侧原片。</p><div class="actions-row"><button class="button small" data-action="play-output" data-path="${esc(result.after)}">${icon('play')}单独查看处理结果</button><a href="${media(result.after)}&download=1">下载试处理视频</a></div>`;
  const before=$('#preview-before'),after=$('#preview-after');
  const sync=()=>{if(Number.isFinite(after.duration))after.currentTime=Math.min(before.currentTime,after.duration);};
  before.addEventListener('play',()=>{sync();after.play().catch(()=>{});});before.addEventListener('pause',()=>after.pause());
@@ -200,7 +226,14 @@ function taskRows(){
   return `<article class="task-row" data-task-id="${j.id}"><div class="task-row-top"><strong>${esc(j.project||j.ids.map(id=>state.projects.find(p=>p.id===id)?.name||'已移除素材').join('、')||'账号操作')}</strong><span class="tag ${j.status==='completed'?'green':j.status==='failed'?'red':'gray'}">${statusLabels[j.status]||j.status}</span></div><div class="task-row-info">${jobLabels[j.kind]||j.kind} · ${j.ids.length} 部剧集 · ${j.checkpointCount||0} 个检查点${seconds?` · 已运行 ${Math.floor(seconds)} 秒`:''} · ${esc(j.id)}</div>${typeof monitorBar==='function'?monitorBar(j.status==='completed'?{percent:100}:j.telemetry?.current,j):''}${j.status==='failed'?taskFailureHTML(j):`<p>${esc(j.stage)}</p>`}<div class="task-row-actions">${productionContinuationButton(j)}<button class="button small" data-action="filter-job-logs" data-id="${esc(j.id)}">只看本任务日志</button><button class="button small" data-progress-action="report" data-id="${esc(j.id)}">导出诊断</button>${active&&j.resumable&&j.status!=='pausing'?`<button class="button small" data-action="control-job" data-id="${j.id}" data-control="pause">暂停</button>`:''}${resume?`<button class="button small primary" data-action="control-job" data-id="${j.id}" data-control="resume">${j.status==='failed'?'重试未完成部分':'从检查点继续'}</button>`:''}${active?`<button class="button small" data-action="control-job" data-id="${j.id}" data-control="cancel">${j.status==='queued'?'取消排队':'停止'}</button>`:''}</div>${taskAPIDetails(j)}</article>`;
  }).join('');
 }
-function mountWorkflow(){if(current==='subtitle')mountSubtitleStudio();}
+function mountWorkflow(){
+ if(current==='subtitle')mountSubtitleStudio();
+ const advanced=$('#scan-advanced-processing');
+ if(current==='scan'&&advanced){
+  advanced.addEventListener('toggle',()=>{advancedProcessingOpen=advanced.open;});
+  if(openAdvancedProcessing){openAdvancedProcessing=false;advancedProcessingOpen=true;advanced.open=true;requestAnimationFrame(()=>{advanced.scrollIntoView({block:'start'});$('summary',advanced).focus({preventScroll:true});});}
+ }
+}
 function updateWorkflowUI(){
  if(current==='subtitle'){updatePreviewResult();updateStudioProxy();updateFullSubtitleResult();}
  if(current==='logs'&&$('#task-history')){
@@ -210,11 +243,16 @@ function updateWorkflowUI(){
    target.innerHTML=html;target.dataset.signature=html;target.querySelectorAll('[data-failure-details]').forEach(el=>el.open=opened.has(el.dataset.failureDetails));
   }
  }
- if(current==='preprocess'&&$('#production-config-plan')){const html=productionPlanItemsHTML();if($('#production-config-plan').innerHTML!==html)$('#production-config-plan').innerHTML=html;}
- if(current==='preprocess'&&$('#production-run-summary'))$('#production-run-summary').textContent='本次将执行：'+pipelineActivitySteps().map(s=>s[0]).join(' → ');
- if(current==='preprocess'&&$('#production-handoff')){const html=productionHandoffHTML();if($('#production-handoff').innerHTML!==html)$('#production-handoff').innerHTML=html;}
+ if(current==='scan'&&$('#production-config-plan')){const html=productionPlanItemsHTML();if($('#production-config-plan').innerHTML!==html)$('#production-config-plan').innerHTML=html;}
+ if(current==='scan'&&$('#production-run-summary'))$('#production-run-summary').textContent='本次将执行：'+pipelineActivitySteps().map(s=>s[0]).join(' → ');
+ if(current==='scan'&&$('#production-handoff')){const html=productionHandoffHTML();if($('#production-handoff').innerHTML!==html)$('#production-handoff').innerHTML=html;}
 }
 async function workflowAction(action,button){
+ if(action==='subtitle-storage-save'){await saveSubtitleStorage();return true;}
+ if(action==='subtitle-storage-pick'){
+  button.disabled=true;try{const result=await api('browse',{mode:'folder'});if(result.path){$('#subtitle-storage-output').value=result.path;$('#subtitle-storage-result').textContent='';subtitleSettingsSaveState('dirty');}}finally{button.disabled=false;}return true;
+ }
+ if(action==='subtitle-cloud-save')return connectionAction('content-ai-save',button);
  if(action==='subtitle-settings-open'){subtitleSettingsTrigger=button;$('#subtitle-source')?.pause();const dialog=$('#subtitle-settings-dialog');if(dialog&&!dialog.open){dialog.showModal();selectSubtitleSettingsTab(subtitleSettingsTab,true);}return true;}
  if(action==='subtitle-settings-close'){$('#subtitle-settings-dialog')?.close();return true;}
  if(action==='subtitle-settings-tab'){selectSubtitleSettingsTab(button.dataset.tab);return true;}

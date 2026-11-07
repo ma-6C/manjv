@@ -147,6 +147,11 @@ class Manager:
                     task.update(status='failed',message='原截图来源已停用，请使用剪映重新采集' if retired else '上次采集已中断，请重新选择剪映工程窗口')
     @property
     def value(self):return self.state['projectEvidence']
+    def output_folder(self,pid):
+        output=self.state.get('config',{}).get('output')
+        root=Path(output)/'工程图' if output else self.data/'official-project-evidence'
+        folder=root/pid;folder.mkdir(parents=True,exist_ok=True)
+        return folder
     def list(self,pid):
         with self.lock:return copy.deepcopy({key:[x for x in self.value[key] if x['projectId']==pid] for key in ('items','tasks')})
     def _record(self,pid,path,platform,source,note,metadata,association):
@@ -186,7 +191,7 @@ class Manager:
                     else:ready_at=None
                 else:raise ValueError('未检测到选中窗口在前台，请展开工程界面后重新采集')
                 with self.lock:task.update(status='capturing',message='正在采集实际窗口');self.save()
-                folder=self.data/'official-project-evidence'/pid;folder.mkdir(parents=True,exist_ok=True)
+                folder=self.output_folder(pid)
                 path=folder/(task['id']+'.png');metadata=self.backend.capture(window,platform,path)
                 if any(metadata.get(k)!=candidate.get(k) for k in ('pid','processPath')):raise ValueError('窗口所属进程已变化，请重新选择')
                 if self.stop.is_set():raise InterruptedError('采集已停止')
@@ -207,13 +212,13 @@ class Manager:
             if self.stop.is_set():raise ValueError('截图服务正在关闭')
             if any(t['status'] in ('waiting_window','capturing','automating') for t in self.value['tasks']):raise ValueError('已有剪映截图任务，请等待当前任务完成')
             task={'id':uuid.uuid4().hex[:16],'projectId':pid,'platform':'jianying','status':'automating',
-                  'message':'正在登记并打开对应剪映工程','createdAt':time.time()}
+                  'message':'正在核对剪映中手动打开的对应工程','createdAt':time.time()}
             self.value['tasks'].append(task);self.value['tasks']=self.value['tasks'][-100:];self.save()
         def run():
             path=None
             event=cancel_event or self.stop
             try:
-                if progress:progress('正在置顶目标草稿并打开第一个草稿')
+                if progress:progress('请手动打开对应剪映工程，软件核对后继续截图')
                 opened=jianying_automation.open_registered_project(imported,opts,event)
                 if not opened.get('projectOpened'):
                     with self.lock:task.update(status='waiting_action',message=opened['message']);self.save()
@@ -226,7 +231,7 @@ class Manager:
                 native=jianying_automation.NativeBackend()
                 exact=native.inspect(imported['name'],{})
                 if exact.get('mode')!='target_editor' or exact.get('windowId')!=frame['windowId']:raise ValueError('采集前工程标题核对失败')
-                folder=self.data/'official-project-evidence'/pid;folder.mkdir(parents=True,exist_ok=True)
+                folder=self.output_folder(pid)
                 path=folder/(task['id']+'.png')
                 metadata=self.backend.capture(frame['windowId'],'jianying',path)
                 exact=native.inspect(imported['name'],{})
@@ -239,7 +244,7 @@ class Manager:
                     paintStable=True,automationWarnings=frame['warnings'])
                 matched={**association,'userConfirmed':body.get('userConfirmed') is True,'projectMatchedByAutomation':True,
                          'status':'已核对工程标题和真实时间线；画面内容及使用效果仍需本人查看'}
-                item=self._record(pid,path,'jianying','window_capture','自动打开本工程后采集的原始剪映窗口',metadata,matched)
+                item=self._record(pid,path,'jianying','window_capture','核对手动打开的本工程后采集的原始剪映窗口',metadata,matched)
                 if on_complete:on_complete(item)
                 with self.lock:task.update(status='completed',message='实际工程截图已保存'+('；'+'；'.join(frame['warnings']) if frame['warnings'] else ''),item=item);self.save()
             except InterruptedError:
@@ -259,7 +264,7 @@ class Manager:
         if body.get('userConfirmed') is not True or not isinstance(note,str) or not note.strip():raise ValueError('请注明剪映工程来源说明并本人确认')
         if not isinstance(paths,list) or not 1<=len(paths)<=30:raise ValueError('一次请选择1至30张实际工程截图')
         from PIL import Image
-        items=[];folder=self.data/'official-project-evidence'/pid;folder.mkdir(parents=True,exist_ok=True)
+        items=[];folder=self.output_folder(pid)
         for value in paths:
             if not isinstance(value,str):raise ValueError('截图路径无效')
             source=Path(value).resolve()

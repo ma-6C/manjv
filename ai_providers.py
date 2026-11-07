@@ -27,6 +27,7 @@ PRESETS = [
 ]
 TEXT_PROTOCOLS = {'chat','responses','anthropic','gemini'}
 IMAGE_PROTOCOLS = {'ark_images','openai_images','openai_edits','gemini_image'}
+SUBTITLE_PROTOCOLS = {'subtitle_json'}
 _KEYS = {}
 _KEY_LOCK = threading.RLock()
 
@@ -74,11 +75,16 @@ def identity(c):
     if c.get('id'):parts.append(c['id'])
     return hashlib.sha256(json.dumps(parts,ensure_ascii=True).encode()).hexdigest()
 
-def set_key(cfg,channel,value):
+def validate_key(value):
     if not isinstance(value,str):raise ValueError('密钥必须为文本')
     value=value.strip()
     if value and (len(value)>4096 or any(ord(x)<33 for x in value)):
         raise ValueError('密钥包含空白、换行或格式异常')
+    return value
+
+
+def set_key(cfg,channel,value):
+    value=validate_key(value)
     with _KEY_LOCK:
         key=(channel,identity(connection(cfg,channel)))
         if value:_KEYS[key]=value
@@ -146,8 +152,12 @@ def request_json(url,payload=None,key='',protocol='chat',timeout=90,raw=None,con
             if not isinstance(result,dict):raise ProviderError('接口返回格式无效','InvalidResponse')
             return result
     except urllib.error.HTTPError as e:raise provider_error(e.code,e.read(65536)) from None
-    except (urllib.error.URLError,TimeoutError,OSError):
-        raise ProviderError('连接超时或网络、HTTPS证书异常；证书校验保持启用。','NetworkError') from None
+    except (urllib.error.URLError,TimeoutError,OSError) as error:
+        reason=error.reason if isinstance(error,urllib.error.URLError) else error
+        kind=type(reason).__name__;number=getattr(reason,'errno',None);verify=getattr(reason,'verify_code',None)
+        detail=kind+(f' / {number}' if isinstance(number,int) else '')+(f' / 证书代码 {verify}' if isinstance(verify,int) else '')
+        if isinstance(reason,str) and 'unknown url type' in reason.lower():detail='HTTPS处理器不可用'
+        raise ProviderError('连接超时或网络、HTTPS证书异常（'+detail+'）；证书校验保持启用。','NetworkError') from None
 
 def extract_text(response,protocol):
     try:
@@ -197,18 +207,74 @@ def text_generate(cfg,system,user,max_tokens=1024):
             'protocol':protocol,'serviceTier':response.get('service_tier'),'seconds':round(time.monotonic()-started,3),
             'usage':response.get('usage') or response.get('usageMetadata') or {}}
 
+def _model_list(base,key,protocol):
+    """Read the full advertised catalogue, including native-provider pagination."""
+    models=set();query='';seen=set()
+    for _ in range(100):
+        data=request_json(base+'/models'+query,None,key,protocol,timeout=20)
+        items=data.get('data') if 'data' in data else data.get('models')
+        if not isinstance(items,list):
+            raise ProviderError('服务未返回模型列表，请核对接口地址与协议；也可以手动填写模型 ID。','InvalidResponse')
+        for item in items:
+            if not isinstance(item,dict):continue
+            model=item.get('id') or item.get('name')
+            if isinstance(model,str) and model.strip():models.add(model.removeprefix('models/'))
+        if protocol.startswith('gemini') and data.get('nextPageToken'):
+            query='?'+urllib.parse.urlencode({'pageToken':data['nextPageToken']})
+        elif protocol=='anthropic' and data.get('has_more'):
+            last=data.get('last_id')
+            if not isinstance(last,str) or not last:break
+            query='?'+urllib.parse.urlencode({'after_id':last})
+        else:return sorted(models)
+        if query in seen:break
+        seen.add(query)
+    raise ProviderError('平台模型列表分页异常或过多，请稍后重试，或手动填写模型 ID。','InvalidResponse')
+
+
 def list_models(cfg,channel='text'):
+    if channel=='subtitle':return discover_models(cfg,channel)['models']
     c=connection(cfg,channel);key=get_key(cfg,channel)
     if not key:raise ValueError('请先设置当前平台的会话密钥')
-    protocol=c['protocol'];url=c['base']+'/models'
-    data=request_json(url,None,key,protocol)
-    items=data.get('data') or data.get('models') or []
-    models=[]
-    for item in items:
-        if not isinstance(item,dict):continue
-        model=item.get('id') or item.get('name')
-        if isinstance(model,str):models.append(model.removeprefix('models/'))
-    return sorted(set(models))[:500]
+    return _model_list(c['base'],key,c['protocol'])
+
+
+def discover_models(cfg,channel='text',draft=None,key=None):
+    """Probe an unsaved connection; keep credentials in memory and never save config."""
+    protocols={'text':TEXT_PROTOCOLS,'image':IMAGE_PROTOCOLS,'subtitle':SUBTITLE_PROTOCOLS}
+    if channel not in protocols:raise ValueError('模型查询用途无效')
+    c=dict(connection(cfg,channel)) if channel!='subtitle' or cfg.get('_aiConnection',{}).get('channel')==channel else {'provider':'custom','protocol':'subtitle_json','base':'','model':''}
+    draft={} if draft is None else draft
+    if not isinstance(draft,dict) or set(draft)-{'provider','protocol','base'}:
+        raise ValueError('模型查询只接受平台、协议和接口地址')
+    c.update(draft)
+    if c['provider'] not in {p['id'] for p in PRESETS}:raise ValueError('未知AI平台')
+    if c['protocol'] not in protocols[channel]:raise ValueError('AI接口协议无效')
+    c['base']=normalize_url(c['base'])
+    selected=cfg|{'_aiConnection':c|{'channel':channel}}
+    secret=validate_key(key) if key is not None else ''
+    secret=secret or get_key(selected,channel)
+    if not secret:raise ProviderError('请先填写当前接口的 API 密钥；更换网址或协议后需要对应的密钥。','MissingKey')
+    base=c['base'];bases=[base]
+    # Only infer a version for a bare service origin. Explicit gateway paths stay intact.
+    if not urllib.parse.urlsplit(base).path:
+        preset=next((p for p in PRESETS if p['id']==c['provider'] and p['base']
+                     and urllib.parse.urlsplit(p['base']).netloc.lower()==urllib.parse.urlsplit(base).netloc.lower()),None)
+        canonical=preset['base'] if preset else base+('/v1beta' if c['protocol'].startswith('gemini') else '/v1')
+        bases=[canonical,base]
+    for index,base in enumerate(bases):
+        try:models=_model_list(base,secret,c['protocol'])
+        except ProviderError as error:
+            if index<len(bases)-1 and (error.status in [404,405] or error.code=='InvalidResponse'):continue
+            raise
+        # A query with a typed key is read-only. A late response must never replace
+        # the key saved by a newer query or edit for the same endpoint.
+        resolved=selected|{'_aiConnection':c|{'channel':channel,'base':base}}
+        if channel!='subtitle' and not key and base!=c['base']:
+            with _KEY_LOCK:
+                if get_key(selected,channel)==secret and not get_key(resolved,channel):
+                    set_key(resolved,channel,secret)
+        return {'models':models,'base':c['base'] if channel=='subtitle' else base,'modelsBase':base,'count':len(models),
+                'note':'模型列表查询成功不代表服务支持去字幕，请通过短片试处理验证。' if channel=='subtitle' else '这是平台向当前密钥返回的模型列表；实际调用仍取决于模型权限、余额和协议。'}
 
 def multipart(fields,image_bytes):
     boundary='manju'+secrets.token_hex(12);parts=[]

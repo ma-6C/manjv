@@ -27,7 +27,10 @@ check('installer_silent_flag_forwarded',script.count('$PrerequisiteSilent')==4 a
 check('reboot_codes_recorded',script.count('SetRebootFlag true')==2)
 check('prerequisite_failure_aborts_before_payload',script.index('Abort',script.index('--install-webview'))<script.index('File /r'))
 check('diagnostic_location_reported','ManjuStudio\\install-logs' in script)
-check('same_directory_offline_v1_import_retained','--install-engine "$EXEDIR\\漫剧工坊-AI离线引擎-v1.zip"' in script)
+check('same_directory_offline_engine_import_retained',
+      'StrCpy $AIEngineArchive "$EXEDIR\\漫剧工坊-AI离线引擎-v2-cu128.zip"' in script
+      and 'StrCpy $AIEngineArchive "$EXEDIR\\漫剧工坊-AI离线引擎-v1.zip"' in script
+      and '--install-engine "$AIEngineArchive"' in script)
 check('uninstall_exact_file_list', 'Delete "$INSTDIR\\_internal\\payload.txt"' in script and 'RMDir /r' not in script)
 check('personal_data_not_deleted','Delete "$INSTDIR\\data' not in script and 'Delete "$LOCALAPPDATA' not in script)
 try:installer.render_script('../v1.0.0',BASE)

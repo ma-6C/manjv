@@ -3,12 +3,13 @@ from pathlib import Path
 import argparse,os,sys,json,threading,time,subprocess,copy,io,urllib.request
 from unittest.mock import patch
 ROOT=Path(__file__).resolve().parent
-parser=argparse.ArgumentParser();parser.add_argument('--compiled',action='store_true');parser.add_argument('--ai',action='store_true');args=parser.parse_args()
+parser=argparse.ArgumentParser();parser.add_argument('--compiled',action='store_true');parser.add_argument('--ai',action='store_true');parser.add_argument('--source',type=Path);args=parser.parse_args()
+if args.ai and (args.source is None or not args.source.is_file()):parser.error('--ai requires --source with a local test video')
 BASE=ROOT/'tmp/progress-acceptance'/time.strftime('%Y%m%d-%H%M%S');BASE.mkdir(parents=True,exist_ok=True)
 os.environ['MANJU_DATA']=str(BASE/'data')
 sys.path[:0]=[str(ROOT/'vendor')]
 if args.compiled:sys.path.insert(0,str(ROOT/'release/v0.7.0/漫剧工坊/_internal'))
-import server as s,task_progress as tp,video_api
+import server as s,task_progress as tp,media_download
 report={'compiled':args.compiled,'core':s.__file__,'checks':[],'realCloudCalls':False,'base':str(BASE)}
 def check(name,**details):
  report['checks'].append({'name':name,**details});(BASE/'report.json').write_text(json.dumps(report,ensure_ascii=False,indent=2),'utf-8');print(name,flush=True)
@@ -62,14 +63,14 @@ class Response(io.BytesIO):
  def __init__(self,payload,length=None):super().__init__(payload);self.headers={} if length is None else {'Content-Length':str(length)}
  def geturl(self):return 'https://test.invalid/result.mp4'
 payload=video.read_bytes();events=[]
-with patch.object(urllib.request,'urlopen',return_value=Response(payload,len(payload))):video_api.download('https://test.invalid/result.mp4',BASE/'download.mp4',threading.Event(),progress=lambda n,t:events.append((n,t)))
+with patch.object(urllib.request,'urlopen',return_value=Response(payload,len(payload))):media_download.download('https://test.invalid/result.mp4',BASE/'download.mp4',threading.Event(),progress=lambda n,t:events.append((n,t)))
 assert events[0]==(0,len(payload)) and events[-1]==(len(payload),len(payload));assert (BASE/'download.mp4').read_bytes()==payload
 check('download_measures_bytes_and_known_length')
 events=[]
-with patch.object(urllib.request,'urlopen',return_value=Response(payload)):video_api.download('https://test.invalid/result.mp4',BASE/'unknown-length.mp4',threading.Event(),progress=lambda n,t:events.append((n,t)))
+with patch.object(urllib.request,'urlopen',return_value=Response(payload)):media_download.download('https://test.invalid/result.mp4',BASE/'unknown-length.mp4',threading.Event(),progress=lambda n,t:events.append((n,t)))
 assert all(t is None for n,t in events);check('unknown_content_length_never_fabricates_percentage')
 with patch.object(urllib.request,'urlopen',return_value=Response(payload,len(payload)+10)):
- try:video_api.download('https://test.invalid/result.mp4',BASE/'truncated.mp4',threading.Event())
+ try:media_download.download('https://test.invalid/result.mp4',BASE/'truncated.mp4',threading.Event())
  except ValueError:pass
  else:raise AssertionError('truncated accepted')
 assert not (BASE/'truncated.mp4').exists();check('truncated_download_not_promoted_to_output')
@@ -78,7 +79,7 @@ diagnostic=json.dumps(tp.report(j2));assert 'TEST-SECRET' not in diagnostic and 
 check('diagnostic_allowlist_excludes_config_raw_errors_and_paths')
 
 if args.ai:
- original=Path(r'D:\weixin_wenjian\xwechat_files\wxid_qet5grsgoecp22_d214\msg\video\2026-10\7ecdbee6fa3a89ad314f90ed019be92c.mp4')
+ original=args.source.resolve()
  engine=json.loads((ROOT/'engines/vsr-install.json').read_text('utf-8'))
  # Prefer previously imported portable engine to prove that the client v1 ZIP remains compatible.
  import engine_manager

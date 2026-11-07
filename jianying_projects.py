@@ -288,7 +288,10 @@ def generate(video,analysis,root,ffmpeg,run,event,notify=lambda *a:None,opts=Non
         raise
 
 def check(folder,*,validate_paths=True):
-    folder=Path(folder).resolve();index=json.loads((folder/'manju_project.json').read_text('utf-8'))
+    folder=Path(folder).resolve()
+    if not (folder/'manju_project.json').is_file():
+        raise ValueError('工程文件夹或 manju_project.json 已移动、删除：'+str(folder)+'。请在本集「详情」中点击「重新定位工程」，选择完整工程所在的文件夹；文件已删除时需重新生成。')
+    index=json.loads((folder/'manju_project.json').read_text('utf-8'))
     if index.get('product')!='ManjuStudio' or index.get('kind')!='jianying_project':raise ValueError('不是本工具导出的剪映工程')
     for item in index['assets']:
         path=(folder/item['relative']).resolve()

@@ -1,12 +1,10 @@
-"""Offline, signed and machine-bound licenses. No signing key is distributed."""
+"""Signed artifact verification and compatibility helpers for historical licenses."""
 from __future__ import annotations
-import base64,json,time,threading,sys,os
+import base64,json,time,sys
 from pathlib import Path
-from win_security import protect,verify,machine_code
+from win_security import verify,machine_code
 from release_key import TRUSTED_PUBLIC_KEYS_B64
-LOCK=threading.RLock();CACHE={}
-
-def required():return bool(getattr(sys,'frozen',False))
+def required():return False
 def decode(value):
     if not isinstance(value,str) or len(value)>48*1024*1024:raise ValueError('签名数据格式无效')
     return base64.b64decode(value+'='*((-len(value))%4),altchars=b'-_',validate=True)
@@ -32,55 +30,44 @@ def validate(token,device=None,now=None):
     if not isinstance(data.get('licenseId'),str):raise ValueError('授权信息不完整')
     return data
 
-def _clock(data,home,write=False):
-    file=home/'license-clock.bin';now=int(time.time());previous={}
-    if file.exists():
-        try:previous=json.loads(protect(file.read_bytes(),decrypt=True))
-        except Exception:raise ValueError('授权时间记录异常，请重新输入授权码') from None
-        if previous.get('licenseId')==data['licenseId'] and now<int(previous.get('seen',0))-300:raise ValueError('系统时间早于上次使用记录，请校准时间后重试')
-    if write and now-int(previous.get('seen',0))>=60:
-        value=protect(json.dumps({'licenseId':data['licenseId'],'seen':max(now,int(previous.get('seen',0)))}).encode())
-        temp=file.with_suffix('.tmp');temp.write_bytes(value);temp.replace(file)
-
 def status(home,force=False):
-    home=Path(home);key=str(home)
-    if not required():return {'required':False,'valid':True,'machineCode':machine_code(),'customer':'开发环境','expiresAt':0}
-    with LOCK:
-        cached=CACHE.get(key)
-        if not force and cached and time.monotonic()-cached[0]<5:return cached[1]
-        result={'required':True,'valid':False,'machineCode':machine_code(),'message':'请联系签发方获取这台电脑的授权码'}
-        try:
-            token=protect((home/'license.bin').read_bytes(),decrypt=True).decode('utf-8');data=validate(token);_clock(data,home,True)
-            result.update(valid=True,customer=data.get('customer',''),licenseId=data['licenseId'],expiresAt=data['expiresAt'],message='授权有效')
-        except FileNotFoundError:pass
-        except Exception as error:result['message']=str(error)
-        CACHE[key]=(time.monotonic(),result);return result
+    return {'required':False,'valid':True,'message':'本地直接使用'}
 
 def activate(home,token):
-    home=Path(home)
-    with LOCK:
-        data=validate(token);home.mkdir(parents=True,exist_ok=True)
-        temp=home/'license.tmp';temp.write_bytes(protect(token.strip().encode()));temp.replace(home/'license.bin')
-        clock=home/'license-clock.bin'
-        # Explicit activation establishes a fresh clock record after signature verification.
-        temp=home/'license-clock.tmp';temp.write_bytes(protect(json.dumps({'licenseId':data['licenseId'],'seen':int(time.time())}).encode()));temp.replace(clock)
-        CACHE.pop(str(home),None);return status(home,True)
+    return status(home)
 
 def require(home):
-    result=status(home)
-    if not result['valid']:raise PermissionError(result['message'])
+    return None
 
 def verify_distribution(home):
-    if not required():return
-    home=Path(home);path=home/'integrity.json'
+    if not getattr(sys,'frozen',False):return
+    home=Path(home).resolve();path=home/'integrity.json'
     if not path.is_file():raise RuntimeError('缺少安装完整性清单，请使用原始安装包重新安装')
     data=signed_payload(json.loads(path.read_text('utf-8')))
     if data.get('product')!='ManjuStudio' or data.get('kind')!='application':raise RuntimeError('安装清单不属于本程序')
-    import hashlib
-    for item in data.get('files',[]):
-        p=(home/item['path']).resolve()
-        if not p.is_relative_to(home.resolve()) or not p.is_file() or p.stat().st_size!=item['bytes']:raise RuntimeError('程序文件缺失或被修改，请重新安装')
-        h=hashlib.sha256()
-        with p.open('rb') as f:
-            while chunk:=f.read(1024*1024):h.update(chunk)
-        if h.hexdigest()!=item['sha256']:raise RuntimeError('程序文件校验失败，请重新安装')
+    import hashlib,re
+    from concurrent.futures import ThreadPoolExecutor
+    files=data.get('files')
+    if not isinstance(files,list) or not files:raise RuntimeError('安装完整性清单为空或无效，请重新安装')
+    names=set()
+    for item in files:
+        if not isinstance(item,dict):raise RuntimeError('安装完整性清单格式无效，请重新安装')
+        name=item.get('path');size=item.get('bytes');digest=item.get('sha256')
+        if (not isinstance(name,str) or not name or Path(name).is_absolute() or Path(name).drive or
+                '..' in Path(name).parts or ':' in name or name.casefold() in names or
+                type(size) is not int or size<0 or not isinstance(digest,str) or not re.fullmatch('[a-f0-9]{64}',digest)):
+            raise RuntimeError('安装完整性清单格式无效，请重新安装')
+        names.add(name.casefold())
+    def verify_file(item):
+        try:
+            p=(home/item['path']).resolve(strict=True)
+            if not p.is_relative_to(home) or not p.is_file() or p.stat().st_size!=item['bytes']:
+                raise RuntimeError('程序文件缺失或被修改，请重新安装')
+            with p.open('rb') as stream:actual=hashlib.file_digest(stream,'sha256').hexdigest()
+            if actual!=item['sha256']:raise RuntimeError('程序文件校验失败，请重新安装')
+        except OSError as error:
+            raise RuntimeError('程序文件缺失或无法读取，请重新安装')from error
+    # Large optional program bundles contain thousands of small files. Bound the
+    # I/O concurrency while still resolving, sizing and hashing every signed row.
+    with ThreadPoolExecutor(max_workers=min(8,len(files))) as pool:
+        for _ in pool.map(verify_file,files):pass

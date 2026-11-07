@@ -1,0 +1,20 @@
+const assert=require('node:assert/strict'),{EventEmitter}=require('node:events');
+const {install}=require('../engines/xiaovmiao-platform-network');
+const app=new EventEmitter(),events=[],policy=install({app,log:v=>events.push(v)});
+function contents(type){const c=new EventEmitter();c.getType=()=>type;c.session={};c.getURL=()=> 'https://creator.douyin.com/private?token=fixture';return c;}
+const main=contents('window'),guest=contents('webview');
+app.emit('web-contents-created',{},main);app.emit('web-contents-created',{},guest);
+assert.equal(policy.canRequest(main.session,'https://creator.douyin.com/'),false);
+assert.equal(policy.canRequest(guest.session,'https://creator.douyin.com/'),true);
+assert.equal(policy.canRequest(guest.session,'wss://example.com/socket'),true);
+assert.equal(policy.canRequest(guest.session,'ftp://example.com/'),false);
+assert.equal(policy.canRequest({},'https://creator.douyin.com/'),false);
+assert.equal(policy.canRequest({},'https://creator.douyin.com/web/api/media/user/info/'),true);
+assert.equal(policy.canRequest({},'https://p3.douyinpic.com/avatar.jpg',{resourceType:'image'}),true);
+assert.equal(policy.canRequest({},'https://p3.douyinpic.com/avatar.jpg',{resourceType:'xhr'}),false);
+assert.equal(policy.canRequest({},'https://evil-douyinpic.com/avatar.jpg',{resourceType:'image'}),false);
+guest.emit('did-finish-load');guest.emit('did-fail-load',{},-105,'DNS','https://creator.douyin.com/private?token=fixture',true);
+assert.equal(events.length,3);assert.equal(events[1].host,'creator.douyin.com');
+assert.equal(JSON.stringify(events).includes('token'),false);
+guest.emit('did-fail-load',{},-3,'aborted','https://example.com/',true);assert.equal(events.length,3);
+console.log('XIAOVMIAO_PLATFORM_NETWORK_POLICY_OK');

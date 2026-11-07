@@ -20,7 +20,7 @@ class Access:
     def configure(self,data):pass
     def snapshot(self):return {}
     def resume(self):pass
-meta={'platform':'hongguo_web','seriesId':'123','title':'隔离恢复测试','intro':'test','episodes':[{'number':n,'playerUrl':'https://hongguoduanju.com/player/123/'+str(n)} for n in range(1,7)],'coverUrl':''}
+meta={'platform':'hongguo_web','seriesId':'12345','title':'隔离恢复测试','intro':'test','episodes':[{'number':n,'playerUrl':'https://hongguoduanju.com/player/12345/'+str(n)} for n in range(1,7)],'coverUrl':''}
 def manager(label,callback=lambda *a:'project'):
     root=BASE/label;root.mkdir()
     def download(url,path,cancel,progress,image=False):path.write_bytes(b'isolated-test-media');progress(19,19)
@@ -30,7 +30,7 @@ def manager(label,callback=lambda *a:'project'):
     m.resolve=lambda *a,**k:copy.deepcopy(meta);m.html=lambda *a,**k:'';m.start_worker=lambda:None
     return m,root
 def start(m,root,numbers,batch=1):
-    row=m.start({'url':'https://hongguoduanju.com/detail?series_id=123','directory':str(root),'video':True,'episodes':numbers,'batchSize':batch})
+    row=m.start({'url':'https://hongguoduanju.com/detail?series_id=12345','directory':str(root),'video':True,'episodes':numbers,'batchSize':batch})
     m.run();return m.get(row['id'])
 def resume(m,row):m.control(row['id'],'resume');m.run()
 calls=[]
@@ -70,7 +70,7 @@ m,root=manager('batch5');row=start(m,root,[5,1,3,2,4,6],5)
 check('legacy_batch_size_does_not_truncate_selected',row['status']=='completed' and row['done']==6 and [x['number'] for x in row['items']]==[5,1,3,2,4,6])
 check('legacy_batch_options_removed_from_task','batchSize' not in row and 'confirmBatches' not in row)
 m2,root2=manager('continuous')
-r2=m2.start({'url':'https://hongguoduanju.com/detail?series_id=123','directory':str(root2),'video':True,'episodes':[6,1,3,2,5,4],'batchSize':1,'confirmBatches':False});m2.run();r2=m2.get(r2['id'])
+r2=m2.start({'url':'https://hongguoduanju.com/detail?series_id=12345','directory':str(root2),'video':True,'episodes':[6,1,3,2,5,4],'batchSize':1,'confirmBatches':False});m2.run();r2=m2.get(r2['id'])
 check('continuous_mode_finishes_all_selected_without_manual_batches',r2['status']=='completed' and r2['done']==6)
 m3,root3=manager('snapshot');original_parse3=m3.h.parse_player
 m3.h.parse_player=lambda html,sid,n,*a: (_ for _ in ()).throw(ValueError('来源页面读取失败：测试第2集')) if n==2 else original_parse3(html,sid,n,*a)
@@ -80,7 +80,7 @@ resume(m3,r3);check('public_selected_links_survive_catalogue_changes',r3['status
 
 m4,root4=manager('partial-failure');original_parse=m4.h.parse_player
 m4.h.parse_player=lambda html,sid,n,*a: (_ for _ in ()).throw(ValueError('来源网站返回 HTTP 404')) if n==2 else original_parse(html,sid,n,*a)
-r4=m4.start({'url':'https://hongguoduanju.com/detail?series_id=123','directory':str(root4),'video':True,'episodes':[1,2,3],'batchSize':1,'confirmBatches':False});m4.run();r4=m4.get(r4['id'])
+r4=m4.start({'url':'https://hongguoduanju.com/detail?series_id=12345','directory':str(root4),'video':True,'episodes':[1,2,3],'batchSize':1,'confirmBatches':False});m4.run();r4=m4.get(r4['id'])
 check('single_unavailable_episode_does_not_block_other_selected',r4['status']=='failed' and r4['done']==2 and r4['items'][1]['status']=='failed')
 diagnostic=m4.report(r4['id']);check('download_diagnostic_excludes_full_paths',str(root4) not in json.dumps(diagnostic) and 'directory' not in diagnostic)
 m4.h.parse_player=original_parse;resume(m4,r4);check('retry_only_failed_episode_preserves_completed_imports',r4['status']=='completed' and r4['done']==3)

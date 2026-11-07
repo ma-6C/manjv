@@ -60,6 +60,7 @@ def record(state,body):
     if status not in ['mounted','failed']:raise ValueError('请选择人工核对结果')
     if body.get('checked') is not True:raise ValueError('请先在平台实际核对发布和挂载结果')
     if row['status']=='cancelled':raise ValueError('已取消的任务不能确认挂载')
+    if row['status'] in ('queued','running'):raise ValueError('平台操作仍在队列或运行中，请等待后再核对')
     ref=text(body.get('postId',''),'平台作品 ID',200);link=url(body.get('postUrl',''),'作品链接')
     note=text(body.get('note',''),'核对说明',2000,True)
     if status=='mounted' and not(ref or link):raise ValueError('请提供作品 ID 或作品链接作为核对依据')

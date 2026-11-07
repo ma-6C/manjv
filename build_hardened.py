@@ -1,15 +1,21 @@
 """Compile product core, bundle clean runtime, sign its integrity manifest."""
 from pathlib import Path
-import sys,os,shutil,ast,json,hashlib,subprocess,argparse,re
+import sys,os,shutil,ast,json,hashlib,subprocess,argparse,re,ssl,uuid
+from tools.release_safety import new_release_destination, companion_files, copy_companion
 ROOT=Path(__file__).resolve().parent
 parser=argparse.ArgumentParser();parser.add_argument('--version',default='v0.5.0');parser.add_argument('--prepare-only',action='store_true',help='Compile and bundle without signing; the result remains unlaunchable until signed')
 parser.add_argument('--issuer',type=Path,default=ROOT/'授权管理/当前签发工具-v2/授权签发工具.exe')
 options=parser.parse_args();version=options.version
 if not re.fullmatch(r'v\d+\.\d+\.\d+',version):raise ValueError('版本号无效')
+DIST=new_release_destination(ROOT,version)
+module_source=ROOT/'modules/xiaovmiao'
+verified_companion=companion_files(module_source)
 STAGE=ROOT/('tmp/hardened-stage-'+version);STAGE.mkdir(parents=True,exist_ok=True)
-DIST=ROOT/'release'/version/'漫剧工坊'
-if (DIST/'data').exists():raise RuntimeError('构建目录含用户数据，请改用新的版本目录')
-MODULES=['server','ai_providers','api_connections','media_download','engine_bridge','licensing','win_security','release_key','runtime_paths','file_picker','local_session','engine_manager','promotions','task_progress','hongguo_source','guoapp_source','official_hongguo_share','source_imports','episode_selection','gpu_encoding','transform_tools','track_sheets','jianying_projects','jianying_timeline','jianying_ai','jianying_editing','jianying_registry','jianying_jobs','jianying_materials','jianying_library','jianying_visual','highlight_render','vsr_pool','lama_local','publish_materials','publish_workflow','publish_browser','project_evidence','studio_flow','studio_flow_adapter','jianying_automation']
+# A development venv points to the developer's base Python. Build an isolated
+# relocatable planner payload instead; it contains pinned code/dependencies only.
+planner_payload=ROOT/'tmp'/('dramaclip-build-'+version+'-'+uuid.uuid4().hex[:10])
+subprocess.run([sys.executable,str(ROOT/'tools/bundle_dramaclip_runtime.py'),'--destination',str(planner_payload)],cwd=ROOT,check=True)
+MODULES=['server','ai_providers','api_connections','media_download','engine_bridge','licensing','win_security','release_key','runtime_paths','file_picker','local_session','engine_manager','promotions','promotion_studio','promotion_engines','promotion_mediakit','promotion_dramaclip','promotion_publish','xiaovmiao','task_progress','hongguo_source','guoapp_source','official_hongguo_share','source_imports','episode_selection','gpu_encoding','transform_tools','track_sheets','cost_reports','jianying_projects','jianying_timeline','jianying_ai','jianying_editing','jianying_registry','jianying_jobs','jianying_materials','jianying_library','jianying_visual','highlight_render','vsr_pool','lama_local','publish_materials','publish_workflow','publish_browser','project_evidence','jianying_automation']
 for module in MODULES:shutil.copy2(ROOT/(module+'.py'),STAGE/(module+'.py'))
 shutil.copy2(ROOT/'desktop.py',STAGE/'desktop.py')
 imports=set()
@@ -29,14 +35,28 @@ for m in MODULES:(STAGE/(m+'.py')).unlink()
 sys.path[:0]=[str(ROOT/'tmp/build-tools'),str(ROOT/'vendor'),str(STAGE)]
 os.chdir(STAGE)
 from PyInstaller.__main__ import run
-args=[str(STAGE/'desktop.py'),'--name','漫剧工坊','--noconsole','--onedir','--noconfirm','--clean','--distpath',str(DIST.parent),'--workpath',str(ROOT/('tmp/pyinstaller-hardened-'+version)),'--specpath',str(STAGE),'--paths',str(STAGE),'--paths',str(ROOT/'vendor'),'--icon',str(ROOT/'assets/app.ico')]
+numbers=tuple(map(int,version[1:].split('.')))+(0,)
+version_file=STAGE/'windows-version.txt'
+version_file.write_text("VSVersionInfo(ffi=FixedFileInfo(filevers="+repr(numbers)+",prodvers="+repr(numbers)+",mask=0x3f,flags=0x0,OS=0x40004,fileType=0x1,subtype=0x0,date=(0,0)),kids=[StringFileInfo([StringTable('080404b0',[StringStruct('CompanyName','ManjuStudio'),StringStruct('FileDescription','漫剧工坊视频制作工作台'),StringStruct('FileVersion',"+repr(version[1:])+"),StringStruct('ProductName','漫剧工坊'),StringStruct('ProductVersion',"+repr(version[1:])+"),StringStruct('OriginalFilename','漫剧工坊.exe')])]),VarFileInfo([VarStruct('Translation',[2052,1200])])])",'utf-8')
+args=[str(STAGE/'desktop.py'),'--name','漫剧工坊','--noconsole','--onedir','--noupx','--noconfirm','--clean','--version-file',str(version_file),'--distpath',str(DIST.parent),'--workpath',str(ROOT/('tmp/pyinstaller-hardened-'+version)),'--specpath',str(STAGE),'--paths',str(STAGE),'--paths',str(ROOT/'vendor'),'--icon',str(ROOT/'assets/app.ico')]
+# This runtime's ssl.py loads an auxiliary certificate rejection list in
+# SSLContext.__new__. Preserve that security policy in frozen applications.
+ssl_source=Path(ssl.__file__)
+ssl_policy=ssl_source.parent/'codex-rejected-cas.pem'
+if 'codex-rejected-cas.pem' in ssl_source.read_text('utf-8'):
+    if not ssl_policy.is_file():raise RuntimeError('Python SSL 运行时缺少证书限制文件，停止打包')
+    args+=['--add-data',str(ssl_policy)+os.pathsep+'.']
 for folder in ['web','assets']:args+=['--add-data',str(ROOT/folder)+os.pathsep+folder]
+args+=['--add-data',str(ROOT/'tools/dramaclip_sidecar.py')+os.pathsep+'tools']
 args+=['--add-data',str(ROOT/'engines/guoapp-core')+os.pathsep+'engines/guoapp-core']
 args+=['--add-data',str(ROOT/'engines/jianying-draft')+os.pathsep+'engines/jianying-draft']
 for folder in ['uploader','utils','conf.py','LICENSE']:args+=['--add-data',str(ROOT/'engines/social-auto-upload'/folder)+os.pathsep+('engines/social-auto-upload' if '.' in folder or folder=='LICENSE' else 'engines/social-auto-upload/'+folder)]
 for module in ['webview','pythonnet','clr_loader','imageio_ffmpeg','patchright','segno','cv2','loguru','pyJianYingDraft','pymediainfo','imageio','uiautomation','comtypes','winrt']:args+=['--collect-all',module]
 for module in MODULES+['webview.platforms.edgechromium','webview.platforms.winforms','package_imports']:args+=['--hidden-import',module]
 run(args)
+shutil.copytree(planner_payload,DIST/'engines/dramaclip',dirs_exist_ok=True)
+# Ship only the clean optional program payload, never its local databases.
+copy_companion(module_source,DIST/'modules/xiaovmiao',verified_companion)
 for cached in list(DIST.rglob('*.pyc')):
     if '__pycache__' in cached.parts:
         if not cached.resolve().is_relative_to(DIST.resolve()):raise ValueError('缓存路径超出发行目录')
@@ -47,7 +67,7 @@ if options.prepare_only:
     # Never leave a stale signature attached to a changed build. Production
     # verification is unchanged and will reject this staging bundle.
     (DIST/'integrity.json').unlink(missing_ok=True)
-    (DIST.parent/'未完成发行-请勿发送.txt').write_text('当前仅完成编译准备，尚未签署发行清单，不能发给客户。生产签名与授权校验保持启用。\n','utf-8-sig')
+    (DIST.parent/'未完成发行-请勿发送.txt').write_text('当前仅完成编译准备，尚未签署发行清单，不能发给客户。安装完整性校验保持启用。\n','utf-8-sig')
     print('UNSIGNED_PREPARATION_ONLY',str(DIST),flush=True);sys.exit(0)
 subprocess.run([sys.executable,str(ROOT/'sign_distribution.py'),'--version',version,'--issuer',str(options.issuer.resolve())],cwd=ROOT,check=True)
 print('HARDENED_BUILD_OK',str(DIST),flush=True)

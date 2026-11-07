@@ -1,17 +1,20 @@
 """Bundle the desktop runtime into a portable folder, without user data/secrets."""
 from pathlib import Path
-import os
+import os,shutil,subprocess,uuid
 import sys
 import argparse
 import re
+from tools.release_safety import new_release_destination, companion_files, copy_companion
 ROOT=Path(__file__).resolve().parent
 parser=argparse.ArgumentParser()
 parser.add_argument('--version',default='v0.2.0')
 args=parser.parse_args()
 if not re.fullmatch(r'v\d+\.\d+\.\d+',args.version):raise ValueError('版本目录格式应为 v0.2.0')
-destination=ROOT/'release'/args.version
-if (destination/'漫剧工坊'/'data').exists():
-    raise RuntimeError('目标版本目录含用户数据，请指定新的 --version，避免覆盖数据。')
+destination=new_release_destination(ROOT,args.version).parent
+module_source=ROOT/'modules/xiaovmiao'
+verified_companion=companion_files(module_source)
+planner_payload=ROOT/'tmp'/('dramaclip-build-'+args.version+'-'+uuid.uuid4().hex[:10])
+subprocess.run([sys.executable,str(ROOT/'tools/bundle_dramaclip_runtime.py'),'--destination',str(planner_payload)],cwd=ROOT,check=True)
 sys.path.insert(0,str(ROOT/'tmp/build-tools'))
 sys.path.insert(0,str(ROOT/'vendor'))
 from PyInstaller.__main__ import run
@@ -21,6 +24,7 @@ run([
     '--paths',str(ROOT/'vendor'),'--icon',str(ROOT/'assets/app.ico'),
     '--add-data',str(ROOT/'web')+os.pathsep+'web',
     '--add-data',str(ROOT/'assets')+os.pathsep+'assets',
+    '--add-data',str(ROOT/'tools/dramaclip_sidecar.py')+os.pathsep+'tools',
     '--add-data',str(ROOT/'engines/guoapp-core')+os.pathsep+'engines/guoapp-core',
     '--add-data',str(ROOT/'engines/jianying-draft')+os.pathsep+'engines/jianying-draft',
     '--add-data',str(ROOT/'engines/social-auto-upload/uploader')+os.pathsep+'engines/social-auto-upload/uploader',
@@ -32,4 +36,7 @@ run([
     '--collect-all','cv2','--collect-all','loguru','--hidden-import','webview.platforms.edgechromium',
     '--collect-all','pyJianYingDraft','--collect-all','pymediainfo','--collect-all','imageio','--collect-all','uiautomation','--collect-all','comtypes',
     '--hidden-import','webview.platforms.winforms','--hidden-import','engine_bridge','--hidden-import','official_hongguo_share',
+    '--hidden-import','promotion_engines','--hidden-import','promotion_mediakit','--hidden-import','promotion_dramaclip',
 ])
+shutil.copytree(planner_payload,destination/'漫剧工坊/engines/dramaclip',dirs_exist_ok=True)
+copy_companion(module_source,destination/'漫剧工坊/modules/xiaovmiao',verified_companion)

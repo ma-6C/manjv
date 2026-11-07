@@ -26,6 +26,8 @@ const (
 	hongguoMultiUserAgent   = "com.phoenix.read/71332 (Linux; U; Android 16; zh_CN; 25053RT47C; Build/BP2A.250605.031.A3; Cronet/TTNetVersion:04657795 2026-01-23 QuicVersion:c67e9834 2025-09-08)"
 )
 
+var errHongguoPlaybackEmpty = errors.New("红果 App 接口未返回有效数据")
+
 var hongguoVodDomains = []string{"qznovelvod.com", "fqnovelvod.com", "douyinvod.com"}
 
 var hongguoAPIDomains = []string{"fqnovel.com", "snssdk.com"}
@@ -56,7 +58,7 @@ func hongguoPyEncode(raw string) string {
 		b := raw[i]
 		switch {
 		case b >= 'A' && b <= 'Z', b >= 'a' && b <= 'z', b >= '0' && b <= '9',
-			b == '-', b == '_', b == '.', b == '~':
+			b == '-', b == '_', b == '.', b == '~', b == '*':
 			out.WriteByte(b)
 		default:
 			const hexDigits = "0123456789ABCDEF"
@@ -68,7 +70,7 @@ func hongguoPyEncode(raw string) string {
 	return out.String()
 }
 
-func hongguoDeviceQuery(rticket int64, iid, deviceID string) string {
+func hongguoDeviceQuery(khronos, rticket int64, iid, deviceID string) string {
 	fields := [][2]string{
 		{"ac", "wifi"},
 		{"channel", "update_64"},
@@ -97,6 +99,7 @@ func hongguoDeviceQuery(rticket int64, iid, deviceID string) string {
 		{"is_android_pad_screen", "0"},
 		{"device_id", deviceID},
 		{"iid", iid},
+		{"ts", strconv.FormatInt(khronos, 10)},
 		{"_rticket", strconv.FormatInt(rticket, 10)},
 	}
 	var parts []string
@@ -107,6 +110,19 @@ func hongguoDeviceQuery(rticket int64, iid, deviceID string) string {
 }
 
 func (downloader *Downloader) hongguoPlayerPost(ctx context.Context, videoID string) (map[string]any, error) {
+	state := &downloader.hongguoClient().playback
+	state.requestMu.Lock()
+	defer state.requestMu.Unlock()
+	if delay := time.Until(state.nextRequest); delay > 0 {
+		timer := time.NewTimer(delay)
+		defer timer.Stop()
+		select {
+		case <-timer.C:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+	defer func() { state.nextRequest = time.Now().Add(3 * time.Second) }()
 	payload := hongguoMultiPayload{
 		BizParam: hongguoMultiBizParam{
 			DetailPageVersion:      0,
@@ -128,7 +144,26 @@ func (downloader *Downloader) hongguoPlayerPost(ctx context.Context, videoID str
 	if err != nil {
 		return nil, err
 	}
-	request, err := http.NewRequestWithContext(ctx, http.MethodPost, hongguoMultiBaseURL+hongguoMultiPath, bytes.NewReader(body))
+	entry, err := downloader.hongguoPlayerPostAt(ctx, videoID, body, identity, hongguoMultiBaseURL)
+	if !errors.Is(err, errHongguoPlaybackEmpty) {
+		return entry, err
+	}
+	timer := time.NewTimer(3 * time.Second)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+	identity, err = downloader.refreshHongguoPlaybackDevice(ctx, identity)
+	if err != nil {
+		return nil, err
+	}
+	return downloader.hongguoPlayerPostAt(ctx, videoID, body, identity, "https://api5-normal-hl.fqnovel.com")
+}
+
+func (downloader *Downloader) hongguoPlayerPostAt(ctx context.Context, videoID string, body []byte, identity hongguoPlaybackIdentity, base string) (map[string]any, error) {
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, base+hongguoMultiPath, bytes.NewReader(body))
 	if err != nil {
 		return nil, err
 	}
@@ -136,7 +171,23 @@ func (downloader *Downloader) hongguoPlayerPost(ctx context.Context, videoID str
 	request.Header.Set("Accept", "application/json; charset=utf-8,application/x-protobuf")
 	request.Header.Set("Content-Type", "application/json; charset=UTF-8")
 	response, err := downloader.doPreparedCatalogRequest(request, 15*time.Second, func(prepared *http.Request) {
-		prepared.URL.RawQuery = hongguoDeviceQuery(time.Now().UnixMilli(), identity.iid, identity.deviceID)
+		now := time.Now()
+		khronos, ticket := now.Unix(), now.UnixMilli()
+		for offset := int64(0); offset < 128; offset++ {
+			prepared.URL.RawQuery = hongguoDeviceQuery(khronos, ticket+offset, identity.iid, identity.deviceID)
+			if hgBranchOf(prepared.URL.RawQuery, body, uint32(khronos)) == 0 {
+				prepared.Header.Set("X-SS-Req-Ticket", strconv.FormatInt(ticket+offset, 10))
+				break
+			}
+		}
+		prepared.Header.Set("Sdk-Version", "2")
+		prepared.Header.Set("X-XS-From-Web", "0")
+		prepared.Header.Set("X-TT-DT", "")
+		prepared.Header.Set("X-TT-Store-Region", "cn")
+		prepared.Header.Set("X-TT-Store-Region-Src", "did")
+		for key, value := range hongguoPureSign(prepared.URL.String(), body, uint32(khronos)) {
+			prepared.Header.Set(key, value)
+		}
 	})
 	if err != nil {
 		return nil, err
@@ -153,7 +204,7 @@ func (downloader *Downloader) hongguoPlayerPost(ctx context.Context, videoID str
 		return nil, errors.New("红果 App 接口响应过大")
 	}
 	if len(content) == 0 {
-		return nil, errors.New("红果 App 接口未返回有效数据")
+		return nil, errHongguoPlaybackEmpty
 	}
 	var result map[string]any
 	decoder := json.NewDecoder(bytes.NewReader(content))

@@ -1,7 +1,7 @@
 {
-  "version": "0.2.68+75-manju.2",
+  "version": "0.2.70+77-manju.3",
   "sourceCommit": "0e60928514c31a96ade9b31866948f15da5ca2a6",
-  "sha256": "ba284be3a9c502d1c66b45674c56df24998c89184b4e80c3912ffddb6fb5c34d",
+  "sha256": "7b77f3d2bce97f3abef84614216f5d1cc8f678885133c7e83b9406d1fbaf0eb0",
   "source": "https://github.com/zhoufuweigg/guoapp",
   "allSources": false,
   "compatibilityPatch": "https://github.com/Xanerix/guoapp/commit/8454613e9113a59fa2315d54f58e72d914b3ffd9",
@@ -13,8 +13,16 @@
     "transientResumeRetries": 1
   },
   "playbackCompatibilityPatch": "https://github.com/limbia/guoapp/commit/5fee5b4e93893cfb75ed0df9e1cbb387b334172d",
-  "playbackRequest": "registered-anonymous/multi_video_model/v1",
-  "playbackVerification": "2026-10-28: 5/5 real downloads, imports and full decodes; 5/5 fresh-process direct resolves",
+  "playbackRequest": "registered-signed/multi_video_model/v1; bounded official fallback and session refresh; strict preview rejection",
+  "playbackVerification": "2026-11-07 12:15 Shanghai: final .manju.3 manager downloaded/imported 3 requested full episodes, verified identity, full declared duration, SHA256 and complete AV decoding (39 checks); all three hashes match preserved production inputs",
   "anonymousPlaybackPatch": "https://github.com/sunnysky123/hongguo-web/commit/334df0a2e9cb55fd8d8a587b92c1bf62106a9570",
-  "playbackVerificationReport": "参考/验证/20261028-hongguo/registered-summary.json"
+  "playbackVerificationReport": "tmp/final-hongguo-manager-e2e-manju3-20261107.json",
+  "protectedPreviewBlocked": true,
+  "expectedDurationBridge": true,
+  "protectedPlaybackPolicy": "reject public previews as full episodes",
+  "signedPlaybackPatch": "https://github.com/sunnysky123/hongguo-web/tree/92ed3b7404cd03270a70b34d87b299dd2d03527c",
+  "fullEpisodeAccessResolved": true,
+  "validationScope": "Verified samples only: two series, episodes 26/37 and comparison episode 1; whole series not verified",
+  "verifiedSampleCount": 3,
+  "wholeSeriesVerified": false
 }

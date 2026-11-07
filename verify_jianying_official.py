@@ -41,7 +41,7 @@ try:
     original_hash=j.sha(source)
     generated=j.generate(video,analysis,BASE/'输出',ffmpeg,run,threading.Event())
     folder=Path(generated['directory']);original=j.check(folder)
-    check('继续生成带真实视频和音轨的可编辑草稿',len(original['assets'])==2 and len(original['ranges'])==2)
+    check('继续生成带真实视频音轨和封面的可编辑草稿',len(original['assets'])>=3 and original['cutPlan']['shortSource'] and len(original['ranges'])==1 and original['durationUs']>=950000)
     with patch.object(j,'_file_version',return_value=metadata),patch.object(j,'_signature',return_value={'valid':False,'publisher':'Unknown'}),patch.object(j.subprocess,'Popen') as launch:
         check('有效工程也不会启动不可信同名程序',rejects(lambda:j.open_in_editor(folder,{'executable':str(exe)})) and not launch.called)
     draft_root=BASE/'剪映草稿位置';draft_root.mkdir()

@@ -6,14 +6,15 @@ const check=(name,value=true)=>{assert.ok(value,name);checks.push(name);console.
 (async()=>{
  const browser=await chromium.launch({headless:true,executablePath:'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe'});
  const page=await browser.newPage({viewport:{width:1600,height:1000},locale:'zh-CN'});page.on('pageerror',e=>errors.push(e.message));
+ async function openAdvanced(){await page.evaluate(()=>location.hash='processing');await page.waitForFunction(()=>current==='scan'&&document.querySelector('#scan-advanced-processing')?.open);}
  const api=(p,body)=>page.evaluate(async({p,body})=>{const r=await fetch('/api/'+p,body===undefined?{}:{method:'POST',headers:{'Content-Type':'application/json','X-Local-Client':'1'},body:JSON.stringify(body)});const v=await r.json();if(!r.ok)throw Error(v.error);return v},{p,body});
  async function complete(id){const deadline=Date.now()+45000;while(Date.now()<deadline){const s=await api('state'),j=s.jobs.find(j=>j.id===id);if(j.status==='completed')return j;if(['failed','cancelled','interrupted'].includes(j.status))throw Error(JSON.stringify(j));await page.waitForTimeout(150)}throw Error('Real media job timed out')}
  await page.route('**/api/environment',r=>r.fulfill({json:{ffmpeg:true,gpu:{available:false,name:'CPU',detail:'isolated real media fixture',adapters:[]},cores:4,python:'fixture',font:true}}));
  page.on('request',r=>{if(r.url().endsWith('/api/jobs')&&r.method()==='POST')requests.push(r.postDataJSON())});
  try{
-  await page.goto(meta.launch);await page.locator('#nav a[href="#preprocess"]').click();
-  check('continuous_and_single_step_actions_are_distinct',await page.getByRole('button',{name:'开始连续制作',exact:true}).isVisible()&&await page.getByRole('button',{name:'仅合并切分',exact:true}).isVisible());
-  check('primary_run_action_is_visible_without_scrolling',await page.getByRole('button',{name:'开始连续制作',exact:true}).evaluate(el=>{const r=el.getBoundingClientRect();return r.top>=0&&r.bottom<innerHeight}));
+  await page.goto(meta.launch);await openAdvanced();
+  check('continuous_and_single_step_actions_are_distinct',await page.getByRole('button',{name:'制作当前剧集',exact:true}).isVisible()&&await page.getByRole('button',{name:'仅合并切分当前剧集',exact:true}).isVisible());
+  check('production_actions_are_inside_expanded_library_advanced_section',await page.locator('#scan-advanced-processing').evaluate(el=>el.open)&&await page.locator('#scan-advanced-processing [data-kind=transcode]').isVisible());
   check('central_step_settings_are_available',await page.locator('.production-options input[data-config]').count()===6);
   check('completed_single_task_sidebar_does_not_imply_full_pipeline',await page.locator('.activity-steps .activity-step').count()===1&&(await page.locator('.activity-steps').innerText()).includes('仅合并切分'));
   check('existing_merge_has_visible_continue_action',await page.locator('#production-handoff [data-action="continue-production"]').isVisible());
@@ -36,16 +37,16 @@ const check=(name,value=true)=>{assert.ok(value,name);checks.push(name);console.
   const before=requests.length;await parentRow.locator('[data-action="production-view"]').click();await page.waitForURL('**/#progress');
   check('view_existing_followup_does_not_resubmit',requests.length===before&&await page.evaluate(id=>monitorId===id,child.id));
   await api('config',{autoCover:true,autoRecords:true,autoCost:false,subtitleAuto:true,subtitleMode:'local'});
-  await page.locator('#nav a[href="#preprocess"]').click();await page.evaluate(()=>refresh(true));
+  await openAdvanced();await page.evaluate(()=>refresh(true));
   const fullResponse=page.waitForResponse(r=>r.url().endsWith('/api/jobs')&&r.request().method()==='POST');
-  await page.getByRole('button',{name:'开始连续制作',exact:true}).click();const full=await(await fullResponse).json();assert.ok(full.id);
+  await page.getByRole('button',{name:'制作当前剧集',exact:true}).click();const full=await(await fullResponse).json();assert.ok(full.id);
   await page.waitForURL('**/#progress');const finished=await complete(full.id);await page.evaluate(()=>refresh());
   check('main_entry_runs_pipeline_instead_of_standalone_merge',requests.at(-1).kind==='pipeline'&&!requests.at(-1).continueFromJob);
   check('main_entry_runs_subtitle_merge_and_all_enabled_followups',finished.currentCompletedStages.join(',')==='subtitle,video,highlight,cover,records');
   check('completion_exposes_all_actual_steps',await page.locator('.activity-steps .activity-step.done').count()===5);
-  await page.locator('#nav a[href="#preprocess"]').click();
+  await openAdvanced();
   const singleResponse=page.waitForResponse(r=>r.url().endsWith('/api/jobs')&&r.request().method()==='POST');
-  await page.getByRole('button',{name:'仅合并切分',exact:true}).click();const single=await(await singleResponse).json();assert.ok(single.id);const one=await complete(single.id);await page.evaluate(async()=>{await refresh();updateWorkflowUI()});
+  await page.getByRole('button',{name:'仅合并切分当前剧集',exact:true}).click();const single=await(await singleResponse).json();assert.ok(single.id);const one=await complete(single.id);await page.evaluate(async()=>{await refresh();updateWorkflowUI()});
   check('explicit_single_mode_stops_after_video_even_if_followups_enabled',one.completedStages.join(',')==='video'&&requests.at(-1).kind==='transcode');
   await page.waitForFunction(()=>document.querySelector('#production-handoff')?.textContent.includes('本次只执行了合并切分'));
   check('single_mode_completion_has_correct_handoff_message',(await page.locator('#production-handoff').innerText()).includes('继续后续制作'));
@@ -53,8 +54,8 @@ const check=(name,value=true)=>{assert.ok(value,name);checks.push(name);console.
   await page.locator('#content .card').first().screenshot({path:path.join(evidence,'production-entry.png')});
   await page.setViewportSize({width:1024,height:768});
   check('step_settings_and_actions_fit_narrow_window',await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth));
-  await page.getByRole('button',{name:'开始连续制作',exact:true}).scrollIntoViewIfNeeded();
-  check('primary_action_remains_accessible_at_narrow_width',await page.getByRole('button',{name:'开始连续制作',exact:true}).isVisible());
+  await page.getByRole('button',{name:'制作当前剧集',exact:true}).scrollIntoViewIfNeeded();
+  check('primary_action_remains_accessible_at_narrow_width',await page.getByRole('button',{name:'制作当前剧集',exact:true}).isVisible());
   check('no_browser_runtime_errors',errors.length===0);
   const reportName=meta.compiled?'tmp/production-handoff-ui-compiled-'+meta.version+'.json':'tmp/production-handoff-ui.json';
   fs.writeFileSync(reportName,JSON.stringify({passed:checks.length,checks,errors,version:meta.version,sourceOnly:!meta.compiled,compiled:meta.compiled,nativeDesktopWindow:false,realFFmpeg:true,base:meta.base,jobRequests:requests},null,2));

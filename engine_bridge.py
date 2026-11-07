@@ -7,11 +7,18 @@ import sys
 
 def main():
     parser=argparse.ArgumentParser()
-    parser.add_argument('action',choices=['check','login','upload'])
+    parser.add_argument('action',choices=['check','login','upload','promotion'])
     parser.add_argument('--engine',required=True)
     parser.add_argument('--account',required=True)
     parser.add_argument('--request')
+    parser.add_argument('--result')
     args=parser.parse_args()
+    if args.action=='promotion':
+        if not args.request or not args.result:raise ValueError('推广发布缺少任务或回执路径')
+        sys.path.insert(0,str(Path(__file__).resolve().parent/'vendor'))
+        from promotion_publish import worker
+        worker(args.account,args.request,args.result)
+        return
     root=Path(args.engine).resolve()
     if not (root/'uploader/tencent_uploader/main.py').is_file():
         raise RuntimeError('未找到 social-auto-upload 腾讯上传模块')

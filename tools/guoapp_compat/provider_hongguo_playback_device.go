@@ -29,9 +29,21 @@ type hongguoPlaybackIdentity struct {
 }
 
 type hongguoPlaybackRegistration struct {
-	mu         sync.Mutex
-	identity   hongguoPlaybackIdentity
-	retryAfter time.Time
+	mu          sync.Mutex
+	requestMu   sync.Mutex
+	nextRequest time.Time
+	identity    hongguoPlaybackIdentity
+	retryAfter  time.Time
+}
+
+func (downloader *Downloader) refreshHongguoPlaybackDevice(ctx context.Context, previous hongguoPlaybackIdentity) (hongguoPlaybackIdentity, error) {
+	state := &downloader.hongguoClient().playback
+	state.mu.Lock()
+	if state.identity == previous {
+		state.identity = hongguoPlaybackIdentity{}
+	}
+	state.mu.Unlock()
+	return downloader.hongguoPlaybackDevice(ctx)
 }
 
 func hongguoPlaybackRegisterBody(now int64) ([]byte, error) {

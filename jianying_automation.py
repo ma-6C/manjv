@@ -288,40 +288,6 @@ class NativeBackend:
             if not jianying_registry.running():return True
         return False
 
-    def open_first(self,snapshot,name,editor,folder):
-        """Open the indexed first draft by its rendered cover, without scrolling."""
-        if not self.allow_mouse:return False
-        if not jianying_registry.first_draft(folder):return False
-        from PIL import ImageGrab
-        import json
-        import uiautomation as auto
-        descriptor=Path(folder)/'manju-card.json'
-        if not descriptor.is_file():return False
-        marker=json.loads(descriptor.read_text('utf-8'))
-        code=jianying_registry.token(folder,name)
-        if marker.get('token')!=code or marker.get('active') is not True:return False
-        with auto.UIAutomationInitializerInThread(),physical_pixels():
-            fresh=self._inspect(auto,name)
-            if fresh.get('mode')!='home' or fresh.get('windowId')!=snapshot.get('windowId'):return False
-            root=fresh['_root'];root.SetActive(waitTime=.15)
-            if auto.GetForegroundWindow()!=root.NativeWindowHandle:return False
-            rect=root.BoundingRectangle
-            box=(rect.left,rect.top,rect.right,rect.bottom)
-            point=jianying_registry.find_mark(ImageGrab.grab(bbox=box,all_screens=True),code)
-            if point:
-                # Re-observe the thumbnail before sending the single click.
-                again=jianying_registry.find_mark(ImageGrab.grab(bbox=box,all_screens=True),code)
-                if again!=point:return False
-                x,y=point[0]+rect.left,point[1]+rect.top
-                hit=auto.ControlFromPoint(x,y)
-                if not hit or hit.ProcessId!=root.ProcessId or auto.GetForegroundWindow()!=root.NativeWindowHandle:return False
-                if not jianying_registry.first_draft(folder):return False
-                root.DoubleClick(x-rect.left,y-rect.top,simulateMove=False,waitTime=.1);return True
-        return False
-
-    def open_marked(self,snapshot,name,editor,folder):
-        return self.open_first(snapshot,name,editor,folder)
-
 
 def open_registered_project(import_result, options=None, cancel_event=None, *, backend=None, wait_timeout=60):
     """Open only a uniquely identified registered draft, or explain the gate.
@@ -358,20 +324,8 @@ def open_registered_project(import_result, options=None, cancel_event=None, *, b
         native = backend or NativeBackend(opts['mouseOpen'])
         focus=getattr(native,'foreground_for_inspection',None)
         if focus:focus()
-        registration={}
-        if opts['registerIndex'] and backend is None:
-            initial=native.inspect(name,editor)
-            if initial.get('mode')=='home':
-                if not native.close_home(initial,cancel_event or threading.Event()):
-                    return waiting('剪映首页尚未正常退出，请处理提示后继续；目标草稿和已完成记录已保留')
-            elif initial.get('mode')=='other_editor':
-                if initial.get('identityDiagnostic'):return waiting('暂未核对到目标工程：'+initial['identityDiagnostic'])
-                return waiting('剪映当前打开了其他工程，请先保存退出后继续生成工程图')
-            if initial.get('mode')!='target_editor':registration=jianying_registry.register(folder,opts)
         deadline = time.monotonic() + max(0, min(float(wait_timeout), 90))
         launched = False
-        invoked = False
-        action_error=''
         while True:
             if cancel_event and cancel_event.is_set():
                 return {**base, 'status': 'cancelled', 'message': '剪映交接已停止，已导入工程保留'}
@@ -394,35 +348,8 @@ def open_registered_project(import_result, options=None, cancel_event=None, *, b
                 return waiting('剪映当前打开了其他工程。请先自行保存，再打开「' + name + '」后继续')
             if mode in ('ambiguous', 'unsupported'):
                 return waiting('无法唯一确认剪映工程窗口，请在官方剪映打开「' + name + '」后继续')
-            if mode == 'home' and not invoked:
-                # The current native home exposes no per-card UIA titles.
-                # Prefer the target we registered first; a unique cover mark
-                # identifies its actual position in the rendered home window.
-                if opts['mouseOpen'] and hasattr(native,'open_first'):
-                    if not jianying_registry.first_draft(folder):
-                        return waiting(registration.get('message') or '本次工程尚未置顶到第一个草稿，请退出剪映后继续')
-                    try:invoked=bool(native.open_first(snapshot,name,editor,folder))
-                    except Exception as error:
-                        invoked=True;action_error=str(error)[:500]
-                    if invoked:continue
-                    if time.monotonic()>=deadline:
-                        return waiting('剪映首页尚未显示可定位的第一个目标草稿，请等待首页加载完成后继续')
-                    if cancel_event:cancel_event.wait(.25)
-                    else:time.sleep(.25)
-                    continue
-                if snapshot.get('targetCount') != 1:
-                    if opts['mouseOpen'] and hasattr(native,'open_marked') and native.open_marked(snapshot,name,editor,folder):
-                        invoked=True
-                        continue
-                    return waiting(registration.get('message') or '请在剪映草稿列表打开「' + name + '」。未找到唯一匹配的标题或封面标记')
-                try:
-                    invoked = bool(native.open_target(snapshot, name, editor))
-                except Exception:
-                    # An action exception may have taken effect. Observe once
-                    # again; never blindly repeat the native action.
-                    invoked = True
-                if not invoked:
-                    return waiting('已找到草稿，暂时无法安全自动打开。请手动打开「' + name + '」后继续')
+            if mode == 'home':
+                return waiting('工程已导入。请在剪映中手动打开「' + name + '」后继续；软件不会自动点击草稿卡片。','editor_manual_open')
             elif mode == 'unavailable' and not launched:
                 try:
                     result = native.launch(folder, opts)
@@ -431,7 +358,7 @@ def open_registered_project(import_result, options=None, cancel_event=None, *, b
                 except Exception as error:
                     return waiting('启动官方剪映失败：' + str(error)[:300], 'editor_launch')
             if time.monotonic() >= deadline:
-                return waiting(('定位草稿时发生错误：'+action_error+'。' if action_error else '')+'工程已交给剪映，尚未读到可核验的工程标题和时间线。请打开「' + name + '」后继续')
+                return waiting('工程已交给剪映，尚未读到可核验的工程标题和时间线。请手动打开「' + name + '」后继续')
             if cancel_event:
                 cancel_event.wait(.25)
             else:

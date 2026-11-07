@@ -130,10 +130,14 @@ for line in sys.stdin:
   if device.startswith('cuda'):
    print(f'STTN GPU: {torch.cuda.get_device_name()}; capability {torch.cuda.get_device_capability()}; compiled architectures {torch.cuda.get_arch_list()}',file=sys.stderr,flush=True)
   if not sr.video_cap.isOpened() or sr.frame_count<=0:raise ValueError('VSR cannot open input video')
+  keep=float(request.get('preserveTailSeconds',0))
+  if not math.isfinite(keep) or keep<0:raise ValueError('Invalid subtitle tail preservation duration')
+  process_until=max(0,min(sr.frame_count,math.ceil(sr.frame_count-keep*sr.fps))) if keep else sr.frame_count
+  if keep:sr.ab_sections=[range(0,process_until)]
   sr.sub_areas=request['regions'];sr.video_out_path=request['output'];sr.run()
   if not sr.isFinished:raise RuntimeError('VSR did not finish the whole video')
   completed+=1
-  emit({'event':'result','id':request['id'],'ok':True,'pid':os.getpid(),'device':device,'modelLoads':loads,'modelCacheHits':hits,'completedVideos':completed})
+  emit({'event':'result','id':request['id'],'ok':True,'pid':os.getpid(),'device':device,'modelLoads':loads,'modelCacheHits':hits,'completedVideos':completed,'preserveTailSeconds':keep,'processedFrames':process_until,'preservedTailFrames':sr.frame_count-process_until})
  except Exception as error:
   print(traceback.format_exc(),file=sys.stderr)
   models.clear();gc.collect()

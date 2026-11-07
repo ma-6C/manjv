@@ -4,7 +4,7 @@ let jyCustom=null,jySettingsSnapshot=null;
 const jyCustomMode=()=>jyCustom??(state.jianyingCustom===true);
 const jyLive=()=>state.jobs.some(j=>j.kind==='jianying_project'&&['queued','running','pausing'].includes(j.status));
 let jianyingOptions=null,jianyingSource='original',jianyingStatus='',jianyingJob='',jyStatusInfo=null,jyStatusLoading=false,jyEvidenceLoading=false,jyEvidenceProject='',jyEvidenceItems=[],jyEvidenceTasks=[],jyEvidenceSignature='',jyCaptureTarget=null,jyWindows=[],jyImported=new Map(),jyBusy=false;
-const jyOptions=()=>jianyingOptions||(jianyingOptions={output:'',splitScenes:true,executable:'',draftRoot:'',timelineMode:'detailed',shotSeconds:10,cameraMotion:true,originalVolume:1,subtitlePath:'',subtitleStyle:'bold',musicPath:'',musicVolume:0.15,soundEffectPath:'',soundEffectVolume:0.35,soundEffectEvery:4,mouseOpen:true,
+const jyOptions=()=>jianyingOptions||(jianyingOptions={output:'',splitScenes:true,executable:'',draftRoot:'',timelineMode:'detailed',shotSeconds:10,cameraMotion:true,originalVolume:1,subtitlePath:'',subtitleStyle:'bold',musicPath:'',musicVolume:0.15,soundEffectPath:'',soundEffectVolume:0.35,soundEffectEvery:4,mouseOpen:false,
  editProfile:'cinema',colorAdjust:true,cutMaterials:true,speedPattern:'original',transition:'dissolve',filterStyle:'cinema',filterIntensity:25,visualEffect:'',overlayText:'',
  audioMode:'separate',captionMode:'auto',aiPython:'',aiModelRoot:'',aiDevice:'auto',aiFailure:'stop',cudaLibraries:'auto',asrLanguage:'zh',separationModel:'htdemucs',captionLength:14,materialLibrary:'',mood:'auto',addBgm:false,adjustTrack:true,duckMusic:true,registerIndex:true,timelineZoom:2,previewBeforeCapture:false,...state.jianyingOptions});
 const jyJob=()=>state.jobs.find(j=>j.id===jianyingJob)||state.jobs.filter(j=>j.kind==='jianying_project').at(-1);
@@ -20,7 +20,7 @@ function jyStatusHTML(){
 function jyRowDetails(row,job){
  if(!row)return '';
  const i=job.jianyingResults.indexOf(row),t=row.timeline||{};
- return `<details class="jy-row-details"><summary>详情</summary><p>${row.segments} 个画面片段 · 人声 ${t.vocalSegments||0} 段 · 字幕 ${t.captionSegments||0} 条 · 配乐 ${t.musicSegments||0} 段 · 音效 ${t.soundEffectSegments||0} 处 · 独立调节 ${t.adjustTrackSegments||0} 层</p>${(row.warnings||[]).map(w=>`<p>${esc(w)}</p>`).join('')}<small>${esc(row.directory)}</small><div class="actions-row"><button class="button small" data-jianying="open" data-id="${esc(job.id)}" data-index="${i}">${icon('folder')}工程目录</button><button class="button small" data-jianying="auto-capture" data-project="${esc(row.projectId)}" data-id="${esc(job.id)}" data-index="${i}" ${jyLive()?'disabled':''}>重新采集工程图</button></div></details>`;
+ return `<details class="jy-row-details"><summary>详情</summary><p>${row.segments} 个画面片段 · 人声 ${t.vocalSegments||0} 段 · 字幕 ${t.captionSegments||0} 条 · 配乐 ${t.musicSegments||0} 段 · 音效 ${t.soundEffectSegments||0} 处 · 独立调节 ${t.adjustTrackSegments||0} 层</p>${(row.warnings||[]).map(w=>`<p>${esc(w)}</p>`).join('')}<small>${esc(row.directory)}</small><div class="actions-row"><button class="button small" data-jianying="reconnect" data-id="${esc(job.id)}" data-index="${i}" ${jyLive()?'disabled':''}>${icon('folder')}重新定位工程</button><button class="button small" data-jianying="open" data-id="${esc(job.id)}" data-index="${i}">${icon('folder')}工程目录</button><button class="button small" data-jianying="auto-capture" data-project="${esc(row.projectId)}" data-id="${esc(job.id)}" data-index="${i}" ${jyLive()?'disabled':''}>重新采集工程图</button></div></details>`;
 }
 function jianyingResults(){
  const job=jyJob();if(!job)return '<div class="jy-auto-empty"><strong>选好剧集即可开始</strong><p>默认方案已配好，生成后工程图会显示在这里。</p></div>';
@@ -40,7 +40,7 @@ function jyGalleryItems(){
  const job=jyJob();if(!job)return jyEvidenceItems;const items=[...(job.jianyingResults||[]).map(r=>r.diagram).filter(Boolean),...jyEvidenceItems.filter(item=>item.projectAssociation?.jobId===job.id)];return [...new Map(items.map(item=>[item.id||item.path,item])).values()];
 }
 function jianyingCard(){
- return card('自动生成工程图','image',`<div class="jy-auto-summary"><div><strong>${jyCustomMode()?'使用已保存的自定义方案':'默认方案已配好'}</strong><p>选集后开始，软件会自动建立工程并在剪映中完成出图。${jyCustomMode()?'':'视频素材按 2～10 秒随机分段，完整保留原片。'}</p></div></div><p id="jy-status" role="status" aria-live="polite">${esc(jianyingStatus)}</p><div id="jy-results" class="jianying-results">${jianyingResults()}</div>`)+`<div id="jy-evidence-items" class="jy-evidence-items jy-auto-gallery">${jyEvidenceHTML(jyGalleryItems())}</div>`+jySettingsHTML();
+ return card('自动生成工程图','image',`<div class="jy-auto-summary"><div><strong>${jyCustomMode()?'使用已保存的自定义方案':'默认方案已配好'}</strong><p>选集后自动建立工程，手动在剪映打开对应草稿后继续截图。${jyCustomMode()?'':'视频素材按 2～10 秒随机分段，完整保留原片。'}</p></div></div><p id="jy-status" role="status" aria-live="polite">${esc(jianyingStatus)}</p><div id="jy-results" class="jianying-results">${jianyingResults()}</div>`)+`<div id="jy-evidence-items" class="jy-evidence-items jy-auto-gallery">${jyEvidenceHTML(jyGalleryItems())}</div>`+jySettingsHTML();
 }
 
 function jyField(label,id,key,placeholder='',browse=''){
@@ -52,9 +52,9 @@ function jySelect(label,key,choices){
 function jyNumber(label,key,min,max,step){return `<div class="field"><label for="jy-${key}">${label}</label><input id="jy-${key}" type="number" data-jy-option="${key}" min="${min}" max="${max}" step="${step}" value="${jyOptions()[key]}"></div>`;}
 function jyCheck(label,key){return `<label class="check-label jy-check"><input type="checkbox" data-jy-option="${key}" ${jyOptions()[key]?'checked':''}>${label}</label>`;}
 function jySettingsHTML(){
- const o=jyOptions();return `<dialog id="jy-settings-dialog" class="jy-settings-dialog" aria-labelledby="jy-settings-title"><div class="dialog-top"><div><h2 id="jy-settings-title">工程图设置</h2><p>默认自动配好，特殊需要时再调整。</p></div><button class="icon-button" data-jianying="settings-close" aria-label="关闭工程图设置">×</button></div>${jySelect('GPU 运行库','cudaLibraries',[['auto','自动 · 优先 PyTorch，失败再尝试 NVIDIA 独立包'],['torch','PyTorch 自带 cuBLAS / cuDNN'],['nvidia','NVIDIA 独立 cuBLAS / cuDNN 包']])}<p class="field-hint">保存后用于新任务。每次切换都会启用新的工作进程，实际使用的库、版本和回退原因保存在任务诊断中。</p><label class="check-label jy-check"><input type="checkbox" id="jy-custom-mode" ${jyCustomMode()?'checked':''}>使用自定义方案（不勾选时自动套用默认方案）</label><details class="jy-advanced-fields"><summary>调整高级参数</summary> <div class="jy-edit-grid">${jySelect('工程方案','timelineMode',[['detailed','完整剪辑 · 分镜、分段音轨与可选包装'],['basic','基础工程 · 分镜画面与整段原声']])}
+ const o=jyOptions();return `<dialog id="jy-settings-dialog" class="jy-settings-dialog" aria-labelledby="jy-settings-title"><div class="dialog-top"><div><h2 id="jy-settings-title">工程图设置</h2><p>默认自动配好，特殊需要时再调整。</p></div><button class="icon-button" data-jianying="settings-close" aria-label="关闭工程图设置">×</button></div><div class="field"><label for="jy-storage-output">文件保存位置</label><div class="path-field"><input id="jy-storage-output" value="${esc(state.config.output)}" spellcheck="false"><button class="button" data-jianying="storage-pick">${icon('folder')}选择文件夹</button></div><p class="field-hint">新工程图保存在此文件夹下的「工程图」中；文案、封面和处理视频也使用此位置。</p></div>${jyField('工程输出目录','jy-output','output','留空：导出目录下的剪映工程','folder')}<p class="field-hint">选择后点击「完成」检查写入权限并记住位置。留空时工程保存在文件保存位置下的「剪映工程」。旧文件不会自动搬移。</p>${jySelect('GPU 运行库' ,'cudaLibraries',[['auto','自动 · 优先 PyTorch，失败再尝试 NVIDIA 独立包'],['torch','PyTorch 自带 cuBLAS / cuDNN'],['nvidia','NVIDIA 独立 cuBLAS / cuDNN 包']])}<p class="field-hint">保存后用于新任务。每次切换都会启用新的工作进程，实际使用的库、版本和回退原因保存在任务诊断中。</p><label class="check-label jy-check"><input type="checkbox" id="jy-custom-mode" ${jyCustomMode()?'checked':''}>使用自定义方案（不勾选时自动套用默认方案）</label><details class="jy-advanced-fields"><summary>调整高级参数</summary> <div class="jy-edit-grid">${jySelect('工程方案','timelineMode',[['detailed','完整剪辑 · 分镜、分段音轨与可选包装'],['basic','基础工程 · 分镜画面与整段原声']])}
  <div class="field"><label for="jy-source">工程输入</label><select id="jy-source"><option value="original" ${jianyingSource==='original'?'selected':''}>左侧所选视频（按选择顺序）</option><option value="final" ${jianyingSource==='final'?'selected':''}>所选剧集的当前成片</option><option value="subtitle" ${jianyingSource==='subtitle'?'selected':''}>所选剧集的去字幕结果</option></select></div></div>
- ${jyField('工程输出目录','jy-output','output','留空：导出目录下的剪映工程','folder')}
+
  <label class="check-label jy-check"><input id="jy-split" type="checkbox" ${o.splitScenes?'checked':''}>识别实际镜头边界</label>
  <div class="jy-edit-grid">${jyNumber('随机切片：最长秒数（最短2秒）','shotSeconds',2,30,0.5)}${jyNumber('原声音量（1为原音量）','originalVolume',0,2,0.05)}</div>
  <label class="check-label jy-check"><input type="checkbox" data-jy-option="cameraMotion" ${o.cameraMotion?'checked':''}>完整剪辑：为每段添加可编辑的轻微推拉运镜</label>
@@ -89,10 +89,9 @@ function jySettingsHTML(){
  ${jyField('转场音效（可选）','jy-soundEffectPath','soundEffectPath','选择本机音效，按画面切点安排','audio')}
  <div class="jy-edit-grid">${jyNumber('每隔几个画面片段安排音效','soundEffectEvery',1,30,1)}${jyNumber('音效音量','soundEffectVolume',0,1,0.05)}</div>
  <p class="field-hint">未提供字幕或音频时会说明缺少的内容，并保留已有画面与原声。</p></details>
- <details class="jy-connection-settings"><summary>自动打开与剪映位置</summary>
- <label class="check-label jy-check"><input type="checkbox" data-jy-option="mouseOpen" ${o.mouseOpen?'checked':''}>允许自动打开时短暂使用鼠标，双击已确认的工程卡片</label>
- <p class="field-hint">优先调用剪映控件的打开动作；需要鼠标时只点击当前唯一匹配的卡片。其他工程正在编辑时会等待你保存和切换。</p>
- ${jyCheck('剪映退出后备份并登记草稿索引，将本工程置顶并添加临时封面标记','registerIndex')}
+ <details class="jy-connection-settings"><summary>截图操作与剪映位置</summary>
+ <label class="check-label jy-check"><input type="checkbox" data-jy-option="mouseOpen" ${o.mouseOpen?'checked':''}>允许截图整理时使用鼠标调整时间线（不会点击草稿卡片）</label>
+ <p class="field-hint">生成后请在剪映里手动打开对应工程，再继续采集截图。软件不点击第一个草稿，也不自动切换到其他草稿。</p>
  ${jyNumber('自动截图：时间线放大步数','timelineZoom',0,5,1)}
  ${jyCheck('自动截图前短暂播放并暂停预览（需识别到播放控件）','previewBeforeCapture')}
  <p class="field-hint">自动出图会置前剪映、调整时间线并等待画面稳定。请暂时停止操作鼠标；已有工程需要你先保存并退出，本工具不会强制关闭。</p>
@@ -100,7 +99,7 @@ function jySettingsHTML(){
  ${jyField('剪映草稿库（自动检测，可手动指定）','jy-draftRoot','draftRoot','选择剪映本地草稿库目录','folder')}
  <button class="button small" data-jianying="status">${icon('refresh')}重新检测剪映</button></details>
  <div class="jy-editor-status" id="jy-editor-status" role="status">${jyStatusHTML()}</div>
-</details><details class="jy-manual-import"><summary>手动操作与已有截图</summary><div class="actions-row"><button class="button" data-jianying="draft-only">只生成可编辑草稿</button><button class="button" data-jianying="relocate">移动后重连素材</button></div>${jyEvidenceCard()}</details><div class="jy-settings-footer"><button class="button" data-jianying="settings-reset">恢复自动方案</button><button class="button primary" data-jianying="settings-save">完成</button></div></dialog>`;
+</details><details class="jy-manual-import"><summary>手动操作与已有截图</summary><div class="actions-row"><button class="button" data-jianying="draft-only">只生成可编辑草稿</button><button class="button" data-jianying="relocate">移动后重连素材</button></div>${jyEvidenceCard()}</details><p id="jy-settings-result" class="content-ai-result" role="status" aria-live="polite"></p><div class="jy-settings-footer"><button class="button" data-jianying="settings-reset">恢复自动方案</button><button class="button primary" data-jianying="settings-save">完成</button></div></dialog>`;
 }
 
 function jyEvidenceCard(){
@@ -110,7 +109,7 @@ function jyEvidenceHTML(items=jyEvidenceItems){
  if(!items.length)return `<div class="jy-evidence-empty">${icon('image')}<strong>还没有工程图</strong><p>选集后点击“生成工程图”，完成的图片会自动保存在这里。</p></div>`;
  return items.map(item=>{const supported=item.platform==='jianying',captured=item.source==='window_capture',verified=supported&&captured&&(item.officialEvidence===true||item.officialEvidence?.appVerified===true),source=!supported?'历史来源 · 不参与工程核验':verified?'官方窗口来源已核验':captured?'窗口采集 · 来源待核对':'本人导入 · 来源未核验',label=supported?'剪映':'历史截图',url=item.url||media(item.path),association=item.projectAssociation;return `<article class="jy-evidence-item"><a href="${esc(url)}" target="_blank" rel="noreferrer"><img src="${esc(url)}" alt="${label}实际截图，${esc(source)}" loading="lazy"></a><div><strong>${esc(supported?(item.name||item.title||'工程截图'):'历史截图')}</strong><span class="tag ${verified?'green':'gray'}">${esc(source)}</span><p>${label} · ${esc(jyStamp(item.capturedAt||item.createdAt))}</p>${association?`<p>${esc(typeof association==='string'?association:association.message||association.status||(association.userConfirmed?'工程归属由本人确认；来源核验不代表工程内容或平台审核已通过':'已登记剧目关联，需本人核对画面内容'))}</p>`:''}${item.note?`<p>${esc(item.note)}</p>`:''}<a href="${esc(url)}${url.includes('?')?'&':'?'}download=1">查看原图</a></div></article>`;}).join('');
 }
-function jyEvidenceTasksHTML(){return jyEvidenceTasks.filter(t=>!t.projectId||t.projectId===jyProjectId()).slice(-3).reverse().map(task=>`<div class="jy-capture-task ${task.status==='failed'?'error':''}"><strong>${esc({waiting_window:'等待切换到官方窗口',automating:'正在自动打开并准备截图',waiting_action:'需要先处理剪映中的提示',capturing:'正在采集窗口',completed:'截图已保存',failed:'未完成截图'}[task.status]||task.status)}</strong><p>${esc(task.message||task.error||'')}</p></div>`).join('');}
+function jyEvidenceTasksHTML(){return jyEvidenceTasks.filter(t=>!t.projectId||t.projectId===jyProjectId()).slice(-3).reverse().map(task=>`<div class="jy-capture-task ${task.status==='failed'?'error':''}"><strong>${esc({waiting_window:'等待切换到官方窗口',automating:'正在核对已打开的工程并准备截图',waiting_action:'需要先处理剪映中的提示',capturing:'正在采集窗口',completed:'截图已保存',failed:'未完成截图'}[task.status]||task.status)}</strong><p>${esc(task.message||task.error||'')}</p></div>`).join('');}
 function jyWindowPickerHTML(){return `<div class="jy-window-choice"><div class="field"><label for="jy-capture-window">选择需要截图的剪映窗口</label><select id="jy-capture-window">${jyWindows.map((w,i)=>`<option value="${i}">${esc(w.title||w.name||'未命名窗口')} · ${esc(w.processName||w.platform||'')}</option>`).join('')}</select></div><p class="field-hint">选定后请在 30 秒内切换到该窗口，保持工程预览与时间线可见。窗口稳定置前后会采集；等待过程不会生成替代图片。</p><label class="check-label jy-check"><input id="jy-capture-confirm" type="checkbox">我已在所选剪映窗口打开本剧实际工程，预览与时间线清晰可见。</label><div class="actions-row"><button class="button primary" data-jianying="capture-window">开始等待并截图</button><button class="button" data-jianying="capture-cancel">取消选择</button></div></div>`;}
 async function jyLoadStatus(){if(jyStatusLoading)return;jyStatusLoading=true;if($('#jy-editor-status'))$('#jy-editor-status').innerHTML=jyStatusHTML();try{jyStatusInfo=await api('jianying/status',{jianying:jyOptions()});}catch(error){jianyingStatus=error.message;}finally{jyStatusLoading=false;if($('#jy-editor-status'))$('#jy-editor-status').innerHTML=jyStatusHTML();if($('#jy-status'))$('#jy-status').textContent=jianyingStatus;}}
 async function jyLoadEvidence(){
@@ -138,16 +137,19 @@ async function jyChooseWindows(target){
 }
 document.addEventListener('click',async e=>{
  const b=e.target.closest('[data-jianying]');if(!b||b.disabled||jyBusy)return;const action=b.dataset.jianying;
- if(action==='settings-open'){jySettingsSnapshot={options:{...jyOptions()},custom:jyCustom,source:jianyingSource};for(const el of document.querySelectorAll('#jy-settings-dialog [data-jy-option]')){if(el.type==='checkbox')el.checked=!!jyOptions()[el.dataset.jyOption];else el.value=jyOptions()[el.dataset.jyOption]??'';}$('#jy-custom-mode').checked=jyCustomMode();$('#jy-split').checked=jyOptions().splitScenes;$('#jy-source').value=jianyingSource;$('#jy-settings-dialog').showModal();return;}
+ if(action==='settings-open')$('#jy-settings-result').textContent='';
+ if(action==='settings-open'){$('#jy-storage-output').value=state.config.output;jySettingsSnapshot={options:{...jyOptions()},custom:jyCustom,source:jianyingSource};for(const el of document.querySelectorAll('#jy-settings-dialog [data-jy-option]')){if(el.type==='checkbox')el.checked=!!jyOptions()[el.dataset.jyOption];else el.value=jyOptions()[el.dataset.jyOption]??'';}$('#jy-custom-mode').checked=jyCustomMode();$('#jy-split').checked=jyOptions().splitScenes;$('#jy-source').value=jianyingSource;$('#jy-settings-dialog').showModal();return;}
  if(action==='settings-close'){$('#jy-settings-dialog').close();return;}
  if(action==='capture-cancel'){jyCaptureTarget=null;jyWindows=[];if($('#jy-window-picker'))$('#jy-window-picker').innerHTML='';return;}
  jyBusy=true;const oldButtonHTML=b.innerHTML;b.disabled=true;b.innerHTML=icon('refresh')+'正在处理…';
  try{
   if(action==='path'){const result=await api('browse',{mode:b.dataset.mode});if(result.path){jyOptions()[b.dataset.key]=result.path;const input=$(`[data-jy-option="${b.dataset.key}"]`);if(input)input.value=result.path;}}
+  else if(action==='storage-pick'){const result=await api('browse',{mode:'folder'});if(result.path)$('#jy-storage-output').value=result.path;}
   else if(action==='status')await jyLoadStatus();
   else if(action==='settings-save'||action==='settings-reset'){
+   $('#jy-settings-result').textContent='正在检查文件夹写入权限…';$('#jy-settings-result').classList.remove('error');
    if(action==='settings-reset'){jyCustom=false;const check=$('#jy-custom-mode');if(check)check.checked=false;}
-   const saved=await api('jianying/options',{options:jyOptions(),custom:jyCustomMode()});jianyingOptions=saved.options;jySettingsSnapshot=null;$('#jy-settings-dialog').close();await refresh();const main=$('.jy-auto-summary strong');if(main)main.textContent=jyCustomMode()?'使用已保存的自定义方案':'默认方案已配好';
+   await saving;const saved=await api('storage/settings',{output:$('#jy-storage-output').value.trim(),options:jyOptions(),custom:jyCustomMode()});state.config=saved.config;state.jianyingOptions=saved.options;jianyingOptions=saved.options;jySettingsSnapshot=null;$('#jy-settings-dialog').close();await refresh();const main=$('.jy-auto-summary strong');if(main)main.textContent=jyCustomMode()?'使用已保存的自定义方案':'默认方案已配好';
   }else if(action==='generate'||action==='draft-only'){
    if(jyLive())throw Error('当前批次正在处理，请等待完成或先暂停');
    const body={...trackSelectionBody(false),kind:'jianying_project',sourceKind:jianyingSource,jianying:{...jyOptions()},autoDiagram:action==='generate',automatic:action==='generate'&&!jyCustomMode()};
@@ -158,16 +160,17 @@ document.addEventListener('click',async e=>{
   else if(action==='install'){
    const result=await api('jianying/install',{jobId:b.dataset.id,index:Number(b.dataset.index),options:jyOptions()});jyImported.set(b.dataset.id+':'+b.dataset.index,result);jyStatusMessage(result.message||'已复制到剪映草稿库。请在剪映打开对应工程核对，尚未验证编辑器画面。');await refresh();
   }else if(action==='auto-open'){
-   jyStatusMessage(jyOptions().mouseOpen?'正在定位本工程；需要鼠标点击时请暂时停止移动鼠标。':'正在定位本工程，请保持剪映窗口可见。');
+   jyStatusMessage('请手动打开本工程，软件核对剪映中的实际工程后继续。');
    const result=await api('jianying/auto-open',{jobId:b.dataset.id,index:Number(b.dataset.index),options:jyOptions()});jyStatusMessage(result.message||'请核对剪映中的本次工程',result.reason==='editor_media_missing');
   }else if(action==='auto-capture'){
    jyEvidenceProject=b.dataset.project;const select=$('#jy-evidence-project');if(select)select.value=jyEvidenceProject;
-   jyStatusMessage('正在登记并打开本工程，随后调整时间线并采集剪映原始窗口。请暂时停止操作鼠标。');
+   jyStatusMessage('请手动打开对应工程，软件核对后整理时间线并采集剪映原始窗口。');
    const result=await api('jianying/auto-capture',{jobId:b.dataset.id,index:Number(b.dataset.index),projectId:b.dataset.project,options:jyOptions()});
    jyStatusMessage(result.message);await jyLoadEvidence();
   }else if(action==='launch'){
    const result=await api('jianying/launch',{jobId:b.dataset.id,index:Number(b.dataset.index),options:jyOptions()});jyStatusMessage(result.message||result.note||'剪映已启动，请在应用中打开对应工程，再采集实际截图。');
-  }else if(action==='relocate'){const result=await api('browse',{mode:'folder'});if(result.path){await api('jianying/relocate',{directory:result.path});jyStatusMessage('素材路径已重新定位。请在剪映打开并核对预览。');}}
+  }else if(action==='reconnect'){const picked=await api('browse',{mode:'folder'});if(picked.path){const result=await api('jianying/relocate',{jobId:b.dataset.id,index:Number(b.dataset.index),directory:picked.path});jyImported.delete(b.dataset.id+':'+b.dataset.index);await refresh();jyStatusMessage(result.message);toast(result.message);}}
+  else if(action==='relocate'){const result=await api('browse',{mode:'folder'});if(result.path){await api('jianying/relocate',{directory:result.path});jyStatusMessage('素材路径已重新定位。请在剪映打开并核对预览。');}}
   else if(action==='control'){await api('jobs/control',{id:b.dataset.id,action:b.dataset.control});await refresh();}
   else if(action==='capture-project'){jyEvidenceProject=b.dataset.project;const select=$('#jy-evidence-project');if(select)select.value=jyEvidenceProject;jyEvidenceItems=[];jyEvidenceTasks=[];jyLoadEvidence();await jyChooseWindows({projectId:b.dataset.project,jobId:b.dataset.id,index:Number(b.dataset.index),platform:'jianying'});}
   else if(action==='capture')await jyChooseWindows();
@@ -181,7 +184,7 @@ document.addEventListener('click',async e=>{
    const note=$('#jy-evidence-note').value.trim();if(!jyProjectId())throw Error('请先选择截图归属剧目');if(!note)throw Error('请填写截图对应的实际工程说明');if(!$('#jy-evidence-confirm').checked)throw Error('请确认图片来自本剧的实际官方应用工程');
    const chosen=await api('browse',{mode:'images'});if(chosen.paths?.length){await api('project-evidence/import',{projectId:jyProjectId(),platform:'jianying',paths:chosen.paths,note,userConfirmed:true});if($('#jy-evidence-status'))$('#jy-evidence-status').textContent='截图已导入，标记为本人确认、来源未核验。';await jyLoadEvidence();}
   }else if(action==='evidence-refresh')await jyLoadEvidence();
- }catch(error){jyStatusMessage(error.message,true);toast(error.message,true);if(action.includes('capture')||action.includes('evidence')){const status=$('#jy-evidence-status');if(status)status.textContent=error.message;}}
+ }catch(error){jyStatusMessage(error.message,true);toast(error.message,true);if(action.startsWith('settings-')){const status=$('#jy-settings-result');if(status){status.textContent=error.message;status.classList.add('error');}}if(action.includes('capture')||action.includes('evidence')){const status=$('#jy-evidence-status');if(status)status.textContent=error.message;}}
  finally{jyBusy=false;if(b.isConnected){b.disabled=false;b.innerHTML=oldButtonHTML;}renderTaskbar();}
 });
 setInterval(()=>{if(current==='tracks'&&jyEvidenceTasks.some(t=>['waiting_window','capturing','automating','queued','running'].includes(t.status)))jyLoadEvidence();},1000);

@@ -23,6 +23,9 @@ def prepare_prerequisites(root=ROOT):
                     '/reference:System.Windows.Forms.dll','/reference:System.Drawing.dll',
                     '/reference:System.Web.Extensions.dll','/out:'+str(target),str(source)],check=True,timeout=60)
     if not target.is_file():raise RuntimeError('环境检查组件编译未生成输出')
+    subprocess.run([str(compiler),'/nologo','/target:winexe','/platform:x64','/optimize+',
+                    '/reference:System.Web.Extensions.dll','/out:'+str(tools/'ManjuSettings.exe'),
+                    str(root/'InstallerSettings.cs')],check=True,timeout=60)
     return target
 
 def render_script(version,root=ROOT):
@@ -58,16 +61,41 @@ VIAddVersionKey /LANG=2052 "LegalCopyright" "ManjuStudio"
 !define MUI_ICON "@ROOT@\assets\app.ico"
 !define MUI_UNICON "@ROOT@\assets\app.ico"
 !define MUI_ABORTWARNING
+!define MANJU_ROOT "@ROOT@"
+!include "@ROOT@\installer_ui.nsh"
+!include "@ROOT@\installer_upgrade.nsh"
+!define MUI_PAGE_CUSTOMFUNCTION_SHOW ManjuStyleWelcome
 !insertmacro MUI_PAGE_WELCOME
+Page custom ManjuUpgradePage ManjuUpgradeLeave
+!define MUI_PAGE_HEADER_TEXT "安装组件"
+!define MUI_PAGE_HEADER_SUBTEXT "选择本次需要安装的内容。"
+!define MUI_PAGE_CUSTOMFUNCTION_SHOW ManjuStylePage
 !insertmacro MUI_PAGE_COMPONENTS
+!define MUI_PAGE_HEADER_TEXT "选择安装位置"
+!define MUI_PAGE_HEADER_SUBTEXT "选择漫剧工坊的程序文件夹。"
+!define MUI_PAGE_CUSTOMFUNCTION_SHOW ManjuStylePage
 !insertmacro MUI_PAGE_DIRECTORY
+!define MUI_PAGE_HEADER_TEXT "正在安装 漫剧工坊"
+!define MUI_PAGE_HEADER_SUBTEXT "正在准备运行环境并复制程序文件，请稍候。"
+!define MUI_PAGE_CUSTOMFUNCTION_SHOW ManjuStylePage
 !insertmacro MUI_PAGE_INSTFILES
+!define MUI_FINISHPAGE_TITLE "安装完成"
+!define MUI_FINISHPAGE_TEXT "漫剧工坊已安装到这台电脑。$\r$\n$\r$\n点击“完成”退出安装向导。你可以从桌面或开始菜单打开软件。"
 !define MUI_FINISHPAGE_RUN "$INSTDIR\漫剧工坊.exe"
 !define MUI_FINISHPAGE_RUN_NOTCHECKED
+!define MUI_FINISHPAGE_RUN_TEXT "立即打开漫剧工坊"
+!define MUI_PAGE_CUSTOMFUNCTION_SHOW ManjuStyleFinish
 !insertmacro MUI_PAGE_FINISH
+!define MUI_PAGE_CUSTOMFUNCTION_SHOW un.ManjuStylePage
 !insertmacro MUI_UNPAGE_CONFIRM
+!define MUI_PAGE_CUSTOMFUNCTION_SHOW un.ManjuStylePage
 !insertmacro MUI_UNPAGE_INSTFILES
 !insertmacro MUI_LANGUAGE "SimpChinese"
+SetFont /LANG=2052 "Microsoft YaHei UI" 10
+LangString ^Font 2052 "Microsoft YaHei UI"
+LangString ^FontSize 2052 "10"
+!insertmacro MANJU_UI_FUNCTIONS
+!insertmacro MANJU_UPGRADE_FUNCTIONS
 Function .onInit
   ${IfNot} ${RunningX64}
     MessageBox MB_ICONSTOP "需要 64 位 Windows 10 或 Windows 11。"
@@ -78,15 +106,18 @@ Function .onInit
     Abort
   ${EndIf}
   SetShellVarContext current
+  Call ManjuDetectOld
+  Call ManjuUpgradeOptions
   StrCpy $PrerequisiteSilent ""
   IfSilent 0 +2
     StrCpy $PrerequisiteSilent "--silent"
 FunctionEnd
-Section "主程序（必需）" SEC_MAIN
+Section "漫剧工坊（必需）" SEC_MAIN
   SectionIn RO
   InitPluginsDir
   SetOutPath "$PLUGINSDIR"
   File "@TOOLS@\ManjuPrerequisites.exe"
+  File "@TOOLS@\ManjuSettings.exe"
   DetailPrint "检查已安装的 Visual C++ x64 与 WebView2，已就绪时跳过安装"
   ExecWait '"$PLUGINSDIR\ManjuPrerequisites.exe" --check-vc --silent' $0
   ${If} $0 == 10
@@ -120,6 +151,9 @@ Section "主程序（必需）" SEC_MAIN
     MessageBox MB_ICONSTOP "WebView2 检查失败（$0）。诊断记录：$LOCALAPPDATA\ManjuStudio\install-logs。"
     Abort
   ${EndIf}
+  Call ManjuCheckSettingsReset
+  Call ManjuRemoveOld
+  Call ManjuApplySettingsReset
   SetRegView 32
   SetOutPath "$INSTDIR"
   File /r "@DIST@\*"
@@ -136,7 +170,7 @@ Section "主程序（必需）" SEC_MAIN
   CreateShortcut "$SMPROGRAMS\漫剧工坊\卸载.lnk" "$INSTDIR\卸载漫剧工坊.exe"
   CreateShortcut "$DESKTOP\漫剧工坊.lnk" "$INSTDIR\漫剧工坊.exe"
 SectionEnd
-Section /o "可选：导入同目录的离线 AI 引擎包" SEC_AI
+Section /o "离线 AI 引擎（同目录导入）" SEC_AI
   StrCpy $AIEngineArchive "$EXEDIR\漫剧工坊-AI离线引擎-v2-cu128.zip"
   IfFileExists "$AIEngineArchive" found try_v1
   try_v1:
@@ -146,11 +180,11 @@ Section /o "可选：导入同目录的离线 AI 引擎包" SEC_AI
     DetailPrint "校验签名并导入离线 AI 引擎，请稍候…"
     ExecWait '"$INSTDIR\漫剧工坊.exe" --install-engine "$AIEngineArchive"' $0
     ${If} $0 != 0
-      MessageBox MB_ICONEXCLAMATION "离线 AI 引擎导入未完成。可在软件的“授权与组件”中重试。"
+      MessageBox MB_ICONEXCLAMATION "离线 AI 引擎导入未完成。可在软件的“本地组件”中重试。"
     ${EndIf}
     Goto end
   missing:
-    MessageBox MB_ICONINFORMATION "未找到同目录离线 AI 引擎包。主程序仍可使用，之后可从“授权与组件”导入。"
+    MessageBox MB_ICONINFORMATION "未找到同目录离线 AI 引擎包。主程序仍可使用，之后可从“本地组件”导入。"
   end:
 SectionEnd
 Section "Uninstall"
@@ -168,12 +202,67 @@ Section "Uninstall"
   ; Personal projects, licenses, models and exports are deliberately preserved.
 SectionEnd
 '''
+def render_ui_preview(root=ROOT,upgrade_example=False):
+    """Same native pages and assets, without installing files or modifying registry."""
+    root=Path(root)
+    script=render_script('v0.0.0',root).split('Function .onInit',1)[0]
+    script=re.sub(r'^OutFile .*$',lambda _: 'OutFile "'+quote(root/'tmp/installer-ui-preview.exe')+'"',script,flags=re.M)
+    script=script.replace('Name "漫剧工坊 0.0.0"','Name "漫剧工坊 · 安装界面预览"')
+    script='\n'.join(line for line in script.splitlines() if not line.startswith('InstallDirRegKey ')
+                    and not line.startswith('!define MUI_FINISHPAGE_RUN'))+'\n'
+    script=script.replace('!define MUI_FINISHPAGE_TEXT "漫剧工坊已安装到这台电脑。',
+                          '!define MUI_FINISHPAGE_TEXT "安装界面预览已完成，本次未安装任何程序。')
+    script=script.replace('你可以从桌面或开始菜单打开软件。','预览程序不会创建桌面或开始菜单快捷方式。')
+    # File /r automatically accounts for real payloads in production. The safe
+    # preview embeds no payload, so use AddSize with the existing release size.
+    candidates=[p for p in (root/'release').glob('v*') if re.fullmatch(r'v\d+\.\d+\.\d+',p.name)
+                and (p/'漫剧工坊/integrity.json').is_file()]
+    if not candidates:raise RuntimeError('没有可用于测算安装空间的发行文件')
+    latest=max(candidates,key=lambda p:tuple(map(int,p.name[1:].split('.'))))
+    payload=[p for p in (latest/'漫剧工坊').rglob('*') if p.is_file()]
+    payload += [root/'tmp/distribution-tools'/n for n in
+                ('ManjuPrerequisites.exe','VC_redist.x64.exe','MicrosoftEdgeWebView2RuntimeInstallerX64.exe')]
+    kib=sum((p.stat().st_size+1023)//1024 for p in payload)
+    script+=r'''
+Section "漫剧工坊（必需）" SEC_MAIN
+  SectionIn RO
+  AddSize @PREVIEW_KIB@
+  DetailPrint "界面验收模式：不安装程序，不修改注册表，不创建快捷方式。"
+  Sleep 1500
+SectionEnd
+Section /o "离线 AI 引擎（同目录导入）" SEC_AI
+  DetailPrint "界面验收模式：不导入引擎。"
+SectionEnd
+Section "Uninstall"
+SectionEnd
+'''
+    if upgrade_example:
+        script+=r'''
+Function .onInit
+  StrCpy $OldFound 1
+  StrCpy $OldRemove 0
+  StrCpy $KeepConfig 1
+  StrCpy $OldVersion "0.10.5"
+  StrCpy $OldInstallDir "$LOCALAPPDATA\Programs\ManjuStudio"
+FunctionEnd
+'''
+    return script.replace('@PREVIEW_KIB@',str(kib))
+
 def main():
     parser=argparse.ArgumentParser();parser.add_argument('--version',default='v0.5.0');parser.add_argument('--prepare-script',action='store_true',help='Prepare NSIS input only; never emit an unsigned client installer')
+    parser.add_argument('--preview-ui',action='store_true',help='Build a harmless wizard using the production UI with no installation actions')
+    parser.add_argument('--preview-upgrade',action='store_true',help='Show example old-version selection in the harmless UI preview')
     options=parser.parse_args();version=options.version
+    if options.preview_ui or options.preview_upgrade:
+        path=ROOT/'tmp/manju-setup-ui-preview.nsi';path.parent.mkdir(parents=True,exist_ok=True)
+        path.write_text(render_ui_preview(upgrade_example=options.preview_upgrade),'utf-8-sig')
+        subprocess.run([str(ROOT/'tmp/distribution-tools/nsis-3.12/makensis.exe'),'/V3',str(path)],check=True)
+        print('INSTALLER_UI_PREVIEW_ONLY',ROOT/'tmp/installer-ui-preview.exe');return
     if not re.fullmatch(r'v\d+\.\d+\.\d+',version):raise ValueError('版本号无效')
     dist=ROOT/'release'/version/'漫剧工坊'
     if not dist.is_dir():raise RuntimeError('找不到发行目录，请先完成编译与签名')
+    installer=dist.parent/('漫剧工坊-安装程序-'+version[1:]+'.exe')
+    if installer.exists():raise FileExistsError('安装包已存在，请指定新版本，保留原交付文件：'+str(installer))
     prepare_prerequisites()
     path=ROOT/('tmp/manju-setup-'+version+'.nsi');path.write_text(render_script(version),'utf-8-sig')
     if options.prepare_script:
@@ -185,6 +274,9 @@ def main():
     finally:
         if previous_frozen is None:del sys.frozen
         else:sys.frozen=previous_frozen
+    from tools.release_safety import verify_manifest_file_set
+    manifest=licensing.signed_payload(json.loads((dist/'integrity.json').read_text('utf-8-sig')))
+    verify_manifest_file_set(dist,manifest)
     subprocess.run([str(ROOT/'tmp/distribution-tools/nsis-3.12/makensis.exe'),'/V3',str(path)],check=True)
 
 if __name__=='__main__':main()

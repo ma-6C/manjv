@@ -1,6 +1,6 @@
 """Persistent, ordered episode imports with stable drama directories."""
 from pathlib import Path
-import copy,hashlib,json,re,threading,time,uuid,shutil,tempfile,concurrent.futures,contextlib
+import copy,hashlib,json,re,threading,time,uuid,shutil,tempfile,concurrent.futures,contextlib,math
 import episode_selection
 
 def read(path,default):
@@ -20,6 +20,35 @@ def check_storage(directory,required=64*1024**2):
     try:
         with tempfile.TemporaryFile(dir=directory) as f:f.write(b'check');f.flush()
     except OSError:raise ValueError('保存目录不可写，请检查权限或选择其他目录') from None
+
+def declared_media_seconds(info, plan=None):
+    values=[(plan or {}).get('expectedDurationSeconds'),info.get('expectedDurationSeconds'),info.get('duration')]
+    declarations=[]
+    for raw in values:
+        if raw is None or raw=='':continue
+        if isinstance(raw,bool):raise ValueError('来源声明时长格式无效')
+        if isinstance(raw,str) and raw.startswith('P'):
+            match=re.fullmatch(r'P(?:(\d+(?:\.\d+)?)D)?(?:T(?:(\d+(?:\.\d+)?)H)?(?:(\d+(?:\.\d+)?)M)?(?:(\d+(?:\.\d+)?)S)?)?',raw)
+            if not match or not any(value is not None for value in match.groups()):raise ValueError('来源声明时长格式无效')
+            seconds=sum(float(value or 0)*factor for value,factor in zip(match.groups(),(86400,3600,60,1)))
+        else:
+            try:seconds=float(raw)
+            except (ValueError,TypeError):raise ValueError('来源声明时长格式无效') from None
+        if not math.isfinite(seconds) or not 0<seconds<=86400:raise ValueError('来源声明时长格式无效')
+        declarations.append(seconds)
+    return max(declarations,default=None)
+
+
+def require_complete_media(info, details, plan=None, episode=None):
+    expected=declared_media_seconds(info,plan)
+    if expected is None:return None
+    try:actual=float(details.get('duration',0))
+    except (ValueError,TypeError):actual=0
+    tolerance=max(.5,min(2.0,expected*.02))
+    if not math.isfinite(actual) or actual+tolerance<expected:
+        raise ValueError(('第'+str(episode)+'集' if episode else '')+'视频校验失败：来源声明 '+format(expected,'.3f')+' 秒，实际 '+format(actual,'.3f')+' 秒；可能仅为试看或不完整，未入库')
+    return expected
+
 
 class DownloadWindow:
     def __init__(self,limit,adaptive):
@@ -288,7 +317,9 @@ class ImportManager:
             if not candidate.resolve().is_relative_to(directory.resolve()):raise ValueError('下载恢复路径超出素材目录')
             if not candidate.is_file() or candidate.stat().st_size!=entry.get('bytes') or digest(candidate)!=entry.get('sha256'):
                 raise ValueError('下载恢复文件与校验记录不一致，未覆盖文件')
-            if not self.probe(candidate).get('duration',0)>0:raise ValueError('下载恢复视频校验失败')
+            recovered_info=self.probe(candidate)
+            if not recovered_info.get('duration',0)>0:raise ValueError('下载恢复视频校验失败')
+            require_complete_media({'expectedDurationSeconds':entry.get('expectedDurationSeconds')},recovered_info,episode=item['number'])
             if candidate==temporary:temporary.rename(target)
             previous=next((r for r in records if r['episode']==item['number']),None)
             if previous and previous!=entry:raise ValueError('下载恢复记录与已有清单冲突，未覆盖')
@@ -341,7 +372,7 @@ class ImportManager:
             nonlocal records
             if event.is_set():raise self.h.Cancelled()
             try:
-                n=item['number']
+                n=item['number'];plan=None
                 with self.lock:item.update(status='running',bytes=0,totalBytes=None,bytesPerSecond=None,etaSeconds=None)
                 item_stage(item,f'核对第{n}集')
                 existing=next((r for r in records if r['episode']==n),None)
@@ -351,7 +382,7 @@ class ImportManager:
                 # Do not wait on a remote page again just to skip the same file.
                 with self.timing(row,item,'lookup'):
                     if existing and path.exists():
-                        info={'episodeId':existing['episodeId'],'uploadDate':existing.get('episodeUploadDate')}
+                        info={'episodeId':existing['episodeId'],'uploadDate':existing.get('episodeUploadDate'),'expectedDurationSeconds':existing.get('expectedDurationSeconds')}
                     elif n in locked:raise ValueError('剧集已锁定，当前来源未提供可访问的素材；请在平台核对授权或导出入口')
                     elif n in available and meta.get('platform')=='guoapp_hongguo':
                         info=self.h.resolve_episode(meta,n,available[n],event)
@@ -363,7 +394,7 @@ class ImportManager:
                             if '剧集已锁定' in str(e):raise
                             item_stage(item,f'重新核对第{n}集来源资料')
                             info=self.h.parse_player(self.html(player_url,refresh=True,cancel=event,expected_episode=n),meta['seriesId'],n,player_url)
-                    else:info={'episodeId':existing['episodeId'],'uploadDate':existing.get('episodeUploadDate')}
+                    else:info={'episodeId':existing['episodeId'],'uploadDate':existing.get('episodeUploadDate'),'expectedDurationSeconds':existing.get('expectedDurationSeconds')}
                 if existing and existing.get('episodeId')!=info['episodeId']:raise ValueError(f'第{n}集来源版本不同，已保留本地文件，请人工核对')
                 with commit_lock:
                     owner=claimed_ids.setdefault(info['episodeId'],n)
@@ -373,7 +404,7 @@ class ImportManager:
                     with self.timing(row,item,'verify'):
                         if not existing or path.stat().st_size!=existing.get('bytes') or digest(path)!=existing.get('sha256'):
                             raise ValueError(f'第{n}集本地文件与记录不一致，未覆盖，请核对')
-                        details=self.probe(path);outcome='skipped'
+                        details=self.probe(path);require_complete_media(info,details,episode=n);outcome='skipped'
                 else:
                     check_storage(directory)
                     temporary=temporary_dir/(info['episodeId']+'.download')
@@ -396,11 +427,12 @@ class ImportManager:
                             dimensions=[details.get('width',0),details.get('height',0)]
                             item['actualQuality']=min(dimensions) if all(dimensions) else 0
                         if not details.get('duration',0)>0:raise ValueError(f'第{n}集视频校验失败')
+                        expected_seconds=require_complete_media(info,details,plan,n)
                         if event.is_set():raise self.h.Cancelled()
                         entry={'episode':n,'episodeId':info['episodeId'],'scope':'原生来源' if meta.get('platform')=='guoapp_hongguo' else '网页公开版','filename':path.name,'bytes':temporary.stat().st_size,
                                'sha256':checksum,'duration':details['duration'],'audio':details.get('audio',False),
                                'requestedQuality':row.get('downloadQuality',0),'actualQuality':item.get('actualQuality',0),
-                               'episodeUploadDate':info['uploadDate'],'verifiedAt':time.time()}
+                               'episodeUploadDate':info['uploadDate'],'verifiedAt':time.time(),'expectedDurationSeconds':expected_seconds,'fullDurationVerified':expected_seconds is not None}
                         with commit_lock:
                             write(temporary_dir/f'{n}.commit.json',entry)
                             temporary.rename(path)

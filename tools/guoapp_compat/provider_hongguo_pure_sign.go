@@ -435,6 +435,7 @@ func hgHashF13(querySm3, bodyMd5, tsBytes []byte, khronos uint32) []byte {
 		r2 := bits.RotateLeft32(di14, 13) ^ bits.RotateLeft32(di14, 15) ^ (di14 >> 10)
 		di[diLen] = di0 + di[i+9] + r1 + r2
 		diLen++
+		di0 = di1
 	}
 
 	initRaw := [...]uint32{0x7aba4fc8, 0x67166507, 0x6403fa00, 0x340f512f, 984304912, 3005047866, 2874125293, 2152413264}

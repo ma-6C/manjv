@@ -84,15 +84,14 @@ try:
     (BASE/'payload.txt').unlink()
     rejected('missing_file_rejected',lambda:lic.verify_distribution(BASE))
     (BASE/'payload.txt').write_bytes(b'safe')
-    # Activation and clock checks use only this disposable directory.
-    status=lic.activate(BASE/'data',new)
-    check('new_license_activation_valid',status['valid'])
-    protected=(BASE/'data/license.bin').read_bytes()
-    check('stored_license_remains_dpapi_protected',new.encode() not in protected and sec.protect(protected,decrypt=True).decode()==new)
-    clock=BASE/'data/license-clock.bin';saved=clock.read_bytes()
-    clock.write_bytes(sec.protect(json.dumps({'licenseId':new_data['licenseId'],'seen':int(time.time())+86400}).encode()))
-    check('clock_rollback_remains_blocked',not lic.status(BASE/'data',True)['valid'])
-    clock.write_bytes(saved);check('restored_test_clock_valid',lic.status(BASE/'data',True)['valid'])
+    home=BASE/'data';home.mkdir()
+    check('frozen_application_does_not_require_activation',not lic.required() and lic.status(home)['valid'])
+    check('legacy_activation_call_does_not_create_license',lic.activate(home,'')['valid'] and not list(home.iterdir()))
+    (home/'license.bin').write_bytes(b'old-unreadable-license')
+    (home/'license-clock.bin').write_bytes(b'old-unreadable-clock')
+    preserved={path.name:digest(path) for path in home.iterdir()}
+    check('old_license_and_clock_do_not_block_use',lic.status(home,True)['valid'] and lic.require(home) is None)
+    check('old_license_files_preserved',preserved=={path.name:digest(path) for path in home.iterdir()})
 finally:
     if old_frozen is None:del sys.frozen
     else:sys.frozen=old_frozen
